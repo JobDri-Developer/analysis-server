@@ -17,6 +17,19 @@ class Settings(BaseSettings):
     rabbitmq_routing_key: str = Field(default="job-posting.ingest", alias="APP_WORKER_JOB_POSTING_ROUTING_KEY")
     rabbitmq_exchange: str = Field(default="jobdri.worker.exchange", alias="APP_WORKER_JOB_POSTING_EXCHANGE")
     rabbitmq_dlq: str = Field(default="jobdri.job-posting.ingest.dlq", alias="APP_WORKER_JOB_POSTING_DLQ")
+    analysis_rabbitmq_queue: str = Field(default="jobdri.analysis.execute", alias="APP_WORKER_ANALYSIS_QUEUE")
+    analysis_rabbitmq_routing_key: str = Field(
+        default="analysis.execute",
+        alias="APP_WORKER_ANALYSIS_ROUTING_KEY",
+    )
+    analysis_rabbitmq_exchange: str = Field(
+        default="jobdri.worker.exchange",
+        alias="APP_WORKER_ANALYSIS_EXCHANGE",
+    )
+    analysis_rabbitmq_dlq: str = Field(
+        default="jobdri.analysis.execute.dlq",
+        alias="APP_WORKER_ANALYSIS_DLQ",
+    )
     rabbitmq_prefetch_count: int = Field(default=1, alias="WORKER_PREFETCH_COUNT")
 
     spring_api_base_url: str = Field(default="http://localhost:8080", alias="SPRING_API_BASE_URL")
@@ -24,11 +37,17 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(alias="OPENAI_API_KEY")
     openai_job_posting_model: str = Field(default="gpt-4o-mini", alias="OPENAI_JOB_POSTING_MODEL")
+    openai_analysis_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_ANALYSIS_MODEL")
     job_posting_confidence_threshold: float = Field(
         default=0.65,
         alias="JOB_POSTING_CLASSIFICATION_CONFIDENCE_THRESHOLD",
     )
     worker_max_retry_count: int = Field(default=3, alias="WORKER_MAX_RETRY_COUNT")
+    analysis_max_retry_count: int = Field(default=3, alias="APP_WORKER_ANALYSIS_MAX_RETRY_COUNT")
+    analysis_queue_timeout_millis: int = Field(
+        default=300000,
+        alias="APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS",
+    )
 
 
 settings = Settings()

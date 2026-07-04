@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -103,9 +103,131 @@ class JobPostingWorkerFailureRequest(BaseModel):
     errorMessage: str
 
 
+FailureReason = Literal["RATE_LIMIT", "QUEUE_TIMEOUT", "OPENAI_TIMEOUT", "VALIDATION_ERROR", "INTERNAL_ERROR"]
+
+
+class AnalysisTaskMessage(BaseModel):
+    messageId: str
+    taskType: Literal["ANALYSIS"]
+    taskId: str
+    userId: int
+    mockApplyId: int
+    creditReferenceId: str
+    retryCount: int = 0
+    maxRetryCount: int = 0
+    submittedAt: str
+
+
+class AnalysisWorkerContextRequest(BaseModel):
+    taskId: str
+    userId: int
+    mockApplyId: int
+
+
+class AnalysisQuestionContextResponse(BaseModel):
+    questionId: int
+    question: str
+    answer: str
+    charLimit: int | None = None
+
+
+class AnalysisWorkerContextResponse(BaseModel):
+    userId: int
+    mockApplyId: int
+    companyName: str
+    jobTitle: str
+    task: str
+    requirements: str
+    preferredQualifications: str
+    bigClassificationName: str
+    middleClassificationName: str
+    detailClassificationName: str
+    questions: list[AnalysisQuestionContextResponse] = Field(default_factory=list)
+
+
+class AnalysisWorkerRunningRequest(BaseModel):
+    workerId: str
+    retryCount: int
+    submittedAt: str | None = None
+
+
+class AnalysisQuestionAnalysisResponse(BaseModel):
+    questionId: int
+    sentence: str
+    status: str
+    reason: str
+    improvement: str
+
+
+class AnalysisLlmResponse(BaseModel):
+    jobFit: int
+    impact: int
+    completeness: int
+    feedback: str
+    questionAnalyses: list[AnalysisQuestionAnalysisResponse]
+
+
+class AnalysisWorkerRetryRequest(BaseModel):
+    errorMessage: str
+    failureReason: FailureReason
+    retryCount: int
+    workerId: str
+    queueLatencyMillis: int | None = None
+    openAiRequestId: str | None = None
+
+
+class AnalysisWorkerFailureRequest(BaseModel):
+    errorMessage: str
+    failureReason: FailureReason
+    retryCount: int
+    workerId: str
+    queueLatencyMillis: int | None = None
+    openAiRequestId: str | None = None
+
+
+class AnalysisWorkerCompleteRequest(BaseModel):
+    userId: int
+    mockApplyId: int
+    workerId: str
+    queueLatencyMillis: int | None = None
+    openAiRequestId: str | None = None
+    llmResponse: AnalysisLlmResponse
+
+
+class AnalysisTaskStatusResponse(BaseModel):
+    status: str | None = None
+    failureReason: FailureReason | None = None
+    workerId: str | None = None
+    retryCount: int | None = None
+    maxRetryCount: int | None = None
+    queueLatencyMillis: int | None = None
+
+
 class RetryableWorkerError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_reason: FailureReason = "INTERNAL_ERROR",
+        openai_request_id: str | None = None,
+        queue_latency_millis: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_reason = failure_reason
+        self.openai_request_id = openai_request_id
+        self.queue_latency_millis = queue_latency_millis
 
 
 class NonRetryableWorkerError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_reason: FailureReason = "INTERNAL_ERROR",
+        openai_request_id: str | None = None,
+        queue_latency_millis: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_reason = failure_reason
+        self.openai_request_id = openai_request_id
+        self.queue_latency_millis = queue_latency_millis
