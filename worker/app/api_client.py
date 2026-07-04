@@ -7,6 +7,13 @@ from pydantic import BaseModel, TypeAdapter
 
 from app.config import settings
 from app.schemas import (
+    AnalysisTaskStatusResponse,
+    AnalysisWorkerCompleteRequest,
+    AnalysisWorkerContextRequest,
+    AnalysisWorkerContextResponse,
+    AnalysisWorkerFailureRequest,
+    AnalysisWorkerRetryRequest,
+    AnalysisWorkerRunningRequest,
     ApiEnvelope,
     JobPostingClassificationCandidateResponse,
     JobPostingExtractResponse,
@@ -65,10 +72,64 @@ class SpringWorkerApiClient:
         )
         return self._parse_result(response, JobPostingIngestResponse)
 
+    def mark_analysis_running(self, task_id: str, request: AnalysisWorkerRunningRequest) -> None:
+        self._post(
+            f"/api/internal/worker/analysis/tasks/{task_id}/running",
+            request.model_dump(mode="json"),
+        )
+
+    def get_analysis_context(self, request: AnalysisWorkerContextRequest) -> AnalysisWorkerContextResponse:
+        response = self._post(
+            "/api/internal/worker/analysis/context",
+            request.model_dump(mode="json"),
+        )
+        return self._parse_result(response, AnalysisWorkerContextResponse)
+
+    def retry_analysis_task(self, task_id: str, request: AnalysisWorkerRetryRequest) -> None:
+        self._post(
+            f"/api/internal/worker/analysis/tasks/{task_id}/retry",
+            request.model_dump(mode="json"),
+        )
+
+    def fail_analysis_task(self, task_id: str, request: AnalysisWorkerFailureRequest) -> None:
+        self._post(
+            f"/api/internal/worker/analysis/tasks/{task_id}/failed",
+            request.model_dump(mode="json"),
+        )
+
+    def complete_analysis_task(self, task_id: str, request: AnalysisWorkerCompleteRequest) -> None:
+        self._post(
+            f"/api/internal/worker/analysis/tasks/{task_id}/complete",
+            request.model_dump(mode="json"),
+        )
+
+    def get_analysis_task(self, task_id: str) -> AnalysisTaskStatusResponse:
+        response = self._get(f"/api/internal/worker/analysis/tasks/{task_id}")
+        return self._parse_result(response, AnalysisTaskStatusResponse)
+
     def _post(self, path: str, payload: dict[str, Any] | None = None) -> ApiEnvelope:
         url = settings.spring_api_base_url.rstrip("/") + path
         try:
             response = self._session.post(url, json=payload, timeout=30)
+        except requests.RequestException as exc:
+            raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
+
+        if response.status_code >= 500:
+            raise RetryableWorkerError(f"Spring API 서버 오류: {response.status_code}")
+
+        try:
+            envelope = ApiEnvelope.model_validate(response.json())
+        except Exception as exc:
+            raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
+
+        if not envelope.isSuccess:
+            raise NonRetryableWorkerError(str(envelope.error or envelope.message))
+        return envelope
+
+    def _get(self, path: str) -> ApiEnvelope:
+        url = settings.spring_api_base_url.rstrip("/") + path
+        try:
+            response = self._session.get(url, timeout=30)
         except requests.RequestException as exc:
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 

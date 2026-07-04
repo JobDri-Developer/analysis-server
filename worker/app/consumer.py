@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import socket
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 import pika
 
 from app.api_client import SpringWorkerApiClient
 from app.config import settings
-from app.openai_client import JobPostingOpenAiWorker
+from app.openai_client import AnalysisOpenAiWorker, JobPostingOpenAiWorker
 from app.schemas import (
+    AnalysisTaskMessage,
+    AnalysisWorkerCompleteRequest,
+    AnalysisWorkerContextRequest,
+    AnalysisWorkerFailureRequest,
+    AnalysisWorkerRetryRequest,
+    AnalysisWorkerRunningRequest,
     JobPostingClassificationResultResponse,
     JobPostingIngestResponse,
     JobPostingIngestTaskMessage,
@@ -30,6 +39,8 @@ class RabbitMqConsumer:
         self._channel: pika.adapters.blocking_connection.BlockingChannel | None = None
         self._api_client = SpringWorkerApiClient()
         self._openai_worker = JobPostingOpenAiWorker()
+        self._analysis_openai_worker = AnalysisOpenAiWorker()
+        self._worker_id = f"{socket.gethostname()}:{os.getpid()}"
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -66,7 +77,15 @@ class RabbitMqConsumer:
                     queue=settings.rabbitmq_queue,
                     on_message_callback=self._on_message,
                 )
-                logger.info("RabbitMQ consumer started. queue=%s", settings.rabbitmq_queue)
+                self._channel.basic_consume(
+                    queue=settings.analysis_rabbitmq_queue,
+                    on_message_callback=self._on_message,
+                )
+                logger.info(
+                    "RabbitMQ consumer started. queues=%s,%s",
+                    settings.rabbitmq_queue,
+                    settings.analysis_rabbitmq_queue,
+                )
                 self._channel.start_consuming()
             except Exception:
                 logger.exception("RabbitMQ consumer 연결/소비 중 오류가 발생했습니다.")
@@ -76,26 +95,35 @@ class RabbitMqConsumer:
     def _on_message(self, channel, method, properties, body: bytes) -> None:  # type: ignore[no-untyped-def]
         try:
             payload = json.loads(body.decode("utf-8"))
-            message = JobPostingIngestTaskMessage.model_validate(payload)
+            message = self._deserialize_message(payload)
         except Exception:
             logger.exception("메시지 역직렬화에 실패했습니다.")
             channel.basic_ack(delivery_tag=method.delivery_tag)
             return
 
         try:
-            self._process_job_posting_task(message)
+            if isinstance(message, AnalysisTaskMessage):
+                self._process_analysis_task(message)
+            else:
+                self._process_job_posting_task(message)
             channel.basic_ack(delivery_tag=method.delivery_tag)
         except NonRetryableWorkerError as exc:
             logger.warning("비재시도 에러로 작업을 실패 처리합니다. taskId=%s error=%s", message.taskId, exc)
-            self._safe_fail_task(message.taskId, str(exc))
-            self._publish_dlq(body, properties)
+            self._handle_non_retryable(message, body, properties, exc)
             channel.basic_ack(delivery_tag=method.delivery_tag)
         except RetryableWorkerError as exc:
             logger.warning("재시도 가능한 에러가 발생했습니다. taskId=%s error=%s", message.taskId, exc)
-            self._retry_or_fail(channel, method.delivery_tag, properties, message, body, str(exc))
+            self._retry_or_fail(channel, method.delivery_tag, properties, message, body, exc)
         except Exception as exc:
             logger.exception("예상치 못한 worker 에러가 발생했습니다. taskId=%s", message.taskId)
-            self._retry_or_fail(channel, method.delivery_tag, properties, message, body, str(exc))
+            retryable_exc = RetryableWorkerError(str(exc), failure_reason="INTERNAL_ERROR")
+            self._retry_or_fail(channel, method.delivery_tag, properties, message, body, retryable_exc)
+
+    def _deserialize_message(self, payload: dict[str, Any]) -> JobPostingIngestTaskMessage | AnalysisTaskMessage:
+        task_type = payload.get("taskType")
+        if task_type == "ANALYSIS":
+            return AnalysisTaskMessage.model_validate(payload)
+        return JobPostingIngestTaskMessage.model_validate(payload)
 
     def _process_job_posting_task(self, message: JobPostingIngestTaskMessage) -> None:
         if message.taskType != "JOB_POSTING_INGEST":
@@ -137,6 +165,38 @@ class RabbitMqConsumer:
             )
         )
 
+    def _process_analysis_task(self, message: AnalysisTaskMessage) -> None:
+        queue_latency_millis = self._compute_queue_latency_millis(message.submittedAt)
+        self._ensure_analysis_not_timed_out(queue_latency_millis)
+
+        self._api_client.mark_analysis_running(
+            message.taskId,
+            AnalysisWorkerRunningRequest(
+                workerId=self._worker_id,
+                retryCount=message.retryCount,
+                submittedAt=message.submittedAt,
+            ),
+        )
+        context = self._api_client.get_analysis_context(
+            AnalysisWorkerContextRequest(
+                taskId=message.taskId,
+                userId=message.userId,
+                mockApplyId=message.mockApplyId,
+            )
+        )
+        llm_response, openai_request_id = self._analysis_openai_worker.analyze(context)
+        self._api_client.complete_analysis_task(
+            message.taskId,
+            AnalysisWorkerCompleteRequest(
+                userId=message.userId,
+                mockApplyId=message.mockApplyId,
+                workerId=self._worker_id,
+                queueLatencyMillis=queue_latency_millis,
+                openAiRequestId=openai_request_id,
+                llmResponse=llm_response,
+            ),
+        )
+
     def _normalize_classification(
         self,
         classification: JobPostingClassificationResultResponse,
@@ -162,18 +222,58 @@ class RabbitMqConsumer:
             confidence=classification.confidence,
         )
 
-    def _retry_or_fail(self, channel, delivery_tag: int, properties, message, body: bytes, error_message: str) -> None:
+    def _retry_or_fail(
+        self,
+        channel,
+        delivery_tag: int,
+        properties,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+        body: bytes,
+        error: RetryableWorkerError,
+    ) -> None:
         next_retry_count = message.retryCount + 1
-        if next_retry_count > settings.worker_max_retry_count:
-            self._safe_fail_task(message.taskId, error_message)
-            self._publish_dlq(body, properties)
-            channel.basic_ack(delivery_tag=delivery_tag)
-            return
+        max_retry_count = self._resolve_max_retry_count(message)
 
-        republished = message.model_copy(update={"retryCount": next_retry_count}).model_dump(mode="json")
+        if isinstance(message, AnalysisTaskMessage):
+            queue_latency_millis = error.queue_latency_millis or self._safe_compute_queue_latency(message.submittedAt)
+            if next_retry_count > max_retry_count:
+                self._safe_fail_analysis_task(
+                    message,
+                    str(error),
+                    error.failure_reason,
+                    next_retry_count,
+                    queue_latency_millis,
+                    error.openai_request_id,
+                )
+                self._publish_dlq(body, properties, message)
+                channel.basic_ack(delivery_tag=delivery_tag)
+                return
+
+            self._safe_retry_analysis_task(
+                message,
+                str(error),
+                error.failure_reason,
+                next_retry_count,
+                queue_latency_millis,
+                error.openai_request_id,
+            )
+        else:
+            if next_retry_count > max_retry_count:
+                self._safe_fail_task(message.taskId, str(error))
+                self._publish_dlq(body, properties, message)
+                channel.basic_ack(delivery_tag=delivery_tag)
+                return
+
+        republished = message.model_copy(
+            update={
+                "retryCount": next_retry_count,
+                "maxRetryCount": max_retry_count if isinstance(message, AnalysisTaskMessage) else None,
+            }
+        ).model_dump(mode="json", exclude_none=True)
+        exchange, routing_key = self._resolve_publish_target(message)
         channel.basic_publish(
-            exchange=settings.rabbitmq_exchange,
-            routing_key=settings.rabbitmq_routing_key,
+            exchange=exchange,
+            routing_key=routing_key,
             body=json.dumps(republished, ensure_ascii=True),
             properties=pika.BasicProperties(
                 content_type="application/json",
@@ -183,12 +283,51 @@ class RabbitMqConsumer:
         )
         channel.basic_ack(delivery_tag=delivery_tag)
 
-    def _publish_dlq(self, body: bytes, properties: Any) -> None:
+    def _handle_non_retryable(
+        self,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+        body: bytes,
+        properties: Any,
+        error: NonRetryableWorkerError,
+    ) -> None:
+        if isinstance(message, AnalysisTaskMessage):
+            queue_latency_millis = error.queue_latency_millis or self._safe_compute_queue_latency(message.submittedAt)
+            self._safe_fail_analysis_task(
+                message,
+                str(error),
+                error.failure_reason,
+                message.retryCount,
+                queue_latency_millis,
+                error.openai_request_id,
+            )
+            self._publish_dlq(body, properties, message)
+            return
+
+        self._safe_fail_task(message.taskId, str(error))
+        self._publish_dlq(body, properties, message)
+
+    def _resolve_publish_target(self, message: JobPostingIngestTaskMessage | AnalysisTaskMessage) -> tuple[str, str]:
+        if isinstance(message, AnalysisTaskMessage):
+            return settings.analysis_rabbitmq_exchange, settings.analysis_rabbitmq_routing_key
+        return settings.rabbitmq_exchange, settings.rabbitmq_routing_key
+
+    def _resolve_max_retry_count(self, message: JobPostingIngestTaskMessage | AnalysisTaskMessage) -> int:
+        if isinstance(message, AnalysisTaskMessage):
+            return message.maxRetryCount or settings.analysis_max_retry_count
+        return settings.worker_max_retry_count
+
+    def _publish_dlq(
+        self,
+        body: bytes,
+        properties: Any,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+    ) -> None:
         if not self._channel or not self._channel.is_open:
             return
+        routing_key = settings.analysis_rabbitmq_dlq if isinstance(message, AnalysisTaskMessage) else settings.rabbitmq_dlq
         self._channel.basic_publish(
             exchange="",
-            routing_key=settings.rabbitmq_dlq,
+            routing_key=routing_key,
             body=body,
             properties=pika.BasicProperties(
                 content_type=getattr(properties, "content_type", "application/json"),
@@ -202,3 +341,77 @@ class RabbitMqConsumer:
             self._api_client.fail_task(task_id, error_message)
         except Exception:
             logger.exception("Spring API에 실패 상태를 반영하지 못했습니다. taskId=%s", task_id)
+
+    def _safe_retry_analysis_task(
+        self,
+        message: AnalysisTaskMessage,
+        error_message: str,
+        failure_reason: str,
+        retry_count: int,
+        queue_latency_millis: int | None,
+        openai_request_id: str | None,
+    ) -> None:
+        try:
+            self._api_client.retry_analysis_task(
+                message.taskId,
+                AnalysisWorkerRetryRequest(
+                    errorMessage=error_message,
+                    failureReason=failure_reason,
+                    retryCount=retry_count,
+                    workerId=self._worker_id,
+                    queueLatencyMillis=queue_latency_millis,
+                    openAiRequestId=openai_request_id,
+                ),
+            )
+        except Exception:
+            logger.exception("Spring API에 analysis retry 상태를 반영하지 못했습니다. taskId=%s", message.taskId)
+
+    def _safe_fail_analysis_task(
+        self,
+        message: AnalysisTaskMessage,
+        error_message: str,
+        failure_reason: str,
+        retry_count: int,
+        queue_latency_millis: int | None,
+        openai_request_id: str | None,
+    ) -> None:
+        try:
+            self._api_client.fail_analysis_task(
+                message.taskId,
+                AnalysisWorkerFailureRequest(
+                    errorMessage=error_message,
+                    failureReason=failure_reason,
+                    retryCount=retry_count,
+                    workerId=self._worker_id,
+                    queueLatencyMillis=queue_latency_millis,
+                    openAiRequestId=openai_request_id,
+                ),
+            )
+        except Exception:
+            logger.exception("Spring API에 analysis 실패 상태를 반영하지 못했습니다. taskId=%s", message.taskId)
+
+    def _compute_queue_latency_millis(self, submitted_at: str) -> int:
+        submitted_at_datetime = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+        if submitted_at_datetime.tzinfo is None:
+            submitted_at_datetime = submitted_at_datetime.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        latency = (now - submitted_at_datetime.astimezone(timezone.utc)).total_seconds() * 1000
+        return max(int(latency), 0)
+
+    def _safe_compute_queue_latency(self, submitted_at: str) -> int | None:
+        try:
+            return self._compute_queue_latency_millis(submitted_at)
+        except Exception:
+            logger.exception("queue latency 계산에 실패했습니다. submittedAt=%s", submitted_at)
+            return None
+
+    def _ensure_analysis_not_timed_out(self, queue_latency_millis: int) -> None:
+        if queue_latency_millis > settings.analysis_queue_timeout_millis:
+            raise NonRetryableWorkerError(
+                (
+                    f"analysis 작업이 queue timeout을 초과했습니다. "
+                    f"latency={queue_latency_millis}ms threshold={settings.analysis_queue_timeout_millis}ms"
+                ),
+                failure_reason="QUEUE_TIMEOUT",
+                queue_latency_millis=queue_latency_millis,
+            )

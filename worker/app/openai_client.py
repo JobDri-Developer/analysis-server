@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
 
 from app.config import settings
 from app.schemas import (
+    AnalysisLlmResponse,
+    AnalysisWorkerContextResponse,
     JobPostingClassificationCandidateResponse,
     JobPostingClassificationResultResponse,
     JobPostingExtractResponse,
     JobPostingGenerateResponse,
+    NonRetryableWorkerError,
+    RetryableWorkerError,
 )
 
 
@@ -181,4 +185,128 @@ class JobPostingOpenAiWorker:
 - 대분류: {classification.bigClassificationName}
 - 중분류: {classification.middleClassificationName}
 - 소분류: {classification.detailClassificationName}
+""".strip()
+
+
+class AnalysisOpenAiWorker:
+    def __init__(self) -> None:
+        self._client = OpenAI(api_key=settings.openai_api_key)
+        self._model = settings.openai_analysis_model
+
+    def analyze(self, context: AnalysisWorkerContextResponse) -> tuple[AnalysisLlmResponse, str | None]:
+        prompt = self._build_analysis_prompt(context)
+
+        try:
+            response = self._client.responses.create(
+                model=self._model,
+                temperature=0.2,
+                input=prompt,
+            )
+            payload = self._parse_json(response.output_text)
+            return AnalysisLlmResponse.model_validate(payload), self._extract_request_id(response)
+        except RateLimitError as exc:
+            raise RetryableWorkerError(
+                f"OpenAI rate limit 발생: {exc}",
+                failure_reason="RATE_LIMIT",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except APITimeoutError as exc:
+            raise RetryableWorkerError(
+                f"OpenAI timeout 발생: {exc}",
+                failure_reason="OPENAI_TIMEOUT",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except (BadRequestError, json.JSONDecodeError, ValueError) as exc:
+            raise NonRetryableWorkerError(
+                f"OpenAI 입력/응답 검증 실패: {exc}",
+                failure_reason="VALIDATION_ERROR",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except APIConnectionError as exc:
+            raise RetryableWorkerError(
+                f"OpenAI 연결 실패: {exc}",
+                failure_reason="OPENAI_TIMEOUT",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except APIStatusError as exc:
+            failure_reason = "INTERNAL_ERROR"
+            if getattr(exc, "status_code", None) == 429:
+                failure_reason = "RATE_LIMIT"
+            raise RetryableWorkerError(
+                f"OpenAI API 상태 오류: {exc}",
+                failure_reason=failure_reason,
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except Exception as exc:
+            raise RetryableWorkerError(
+                f"OpenAI 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
+                failure_reason="INTERNAL_ERROR",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+
+    def _parse_json(self, raw_text: str) -> dict:
+        start = raw_text.find("{")
+        end = raw_text.rfind("}")
+        candidate = raw_text[start : end + 1] if start >= 0 and end >= 0 else raw_text
+        return json.loads(candidate)
+
+    def _extract_request_id(self, response_or_exc: object) -> str | None:
+        for attr_name in ("_request_id", "request_id", "id"):
+            value = getattr(response_or_exc, attr_name, None)
+            if isinstance(value, str) and value:
+                return value
+
+        response = getattr(response_or_exc, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if headers:
+                request_id = headers.get("x-request-id") or headers.get("request-id")
+                if request_id:
+                    return request_id
+        return None
+
+    def _build_analysis_prompt(self, context: AnalysisWorkerContextResponse) -> str:
+        question_block = "\n".join(
+            [
+                (
+                    f"- questionId={question.questionId}\n"
+                    f"  question={question.question}\n"
+                    f"  answer={question.answer}\n"
+                    f"  charLimit={question.charLimit}"
+                )
+                for question in context.questions
+            ]
+        )
+        return f"""
+당신은 자기소개서 분석 평가자입니다.
+지원 직무 적합도, 답변의 임팩트, 전체 완성도를 0부터 100 사이 정수로 평가하고,
+전체 피드백과 각 문항별 분석을 JSON으로만 반환하세요.
+
+반드시 아래 스키마만 반환하세요.
+{{
+  "jobFit": 0,
+  "impact": 0,
+  "completeness": 0,
+  "feedback": "string",
+  "questionAnalyses": [
+    {{
+      "questionId": 1,
+      "sentence": "string",
+      "status": "GOOD|NEEDS_IMPROVEMENT|RISK",
+      "reason": "string",
+      "improvement": "string"
+    }}
+  ]
+}}
+
+[채용 공고]
+- 회사명: {context.companyName}
+- 직무명: {context.jobTitle}
+- 주요 업무: {context.task}
+- 자격 요건: {context.requirements}
+- 우대 사항: {context.preferredQualifications}
+- 직무 분류: {context.bigClassificationName} > {context.middleClassificationName} > {context.detailClassificationName}
+
+[문항 및 답변]
+{question_block}
 """.strip()
