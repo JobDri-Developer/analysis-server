@@ -15,12 +15,13 @@ class ApiEnvelope(BaseModel):
 
 class JobPostingIngestTaskMessage(BaseModel):
     messageId: str
-    taskType: str
+    taskType: Literal["JOB_POSTING_INGEST"]
     taskId: str
     userId: int
     rawText: str | None = None
     imageObjectKey: str | None = None
     retryCount: int = 0
+    maxRetryCount: int = 0
     submittedAt: str
 
 
@@ -31,6 +32,12 @@ class JobPostingWorkerContextRequest(BaseModel):
 
 class JobPostingWorkerContextResponse(BaseModel):
     imageUrl: str | None = None
+
+
+class JobPostingWorkerRunningRequest(BaseModel):
+    workerId: str
+    retryCount: int
+    submittedAt: str | None = None
 
 
 class JobPostingExtractResponse(BaseModel):
@@ -99,11 +106,32 @@ class JobPostingWorkerFinalizeRequest(BaseModel):
     generated: JobPostingGenerateResponse
 
 
+FailureReason = Literal["RATE_LIMIT", "QUEUE_TIMEOUT", "OPENAI_TIMEOUT", "VALIDATION_ERROR", "INTERNAL_ERROR"]
+
+
+class JobPostingWorkerRetryRequest(BaseModel):
+    errorMessage: str
+    failureReason: FailureReason
+    retryCount: int
+    workerId: str
+    queueLatencyMillis: int | None = None
+
+
 class JobPostingWorkerFailureRequest(BaseModel):
     errorMessage: str
+    failureReason: FailureReason
+    retryCount: int
+    workerId: str
+    queueLatencyMillis: int | None = None
 
 
-FailureReason = Literal["RATE_LIMIT", "QUEUE_TIMEOUT", "OPENAI_TIMEOUT", "VALIDATION_ERROR", "INTERNAL_ERROR"]
+class JobPostingTaskStatusResponse(BaseModel):
+    status: str | None = None
+    failureReason: FailureReason | None = None
+    workerId: str | None = None
+    retryCount: int | None = None
+    maxRetryCount: int | None = None
+    queueLatencyMillis: int | None = None
 
 
 class AnalysisTaskMessage(BaseModel):

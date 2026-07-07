@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 
+from pydantic import ValidationError
 from openai import APIConnectionError, APIStatusError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
 
 from app.config import settings
@@ -16,6 +18,8 @@ from app.schemas import (
     RetryableWorkerError,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class JobPostingOpenAiWorker:
     def __init__(self) -> None:
@@ -28,19 +32,20 @@ class JobPostingOpenAiWorker:
         if image_url:
             content.append({"type": "input_image", "image_url": image_url})
 
+        response = self._create_response(
+            input_payload=[{"role": "user", "content": content}],
+            temperature=0.1,
+            operation="extract",
+        )
         try:
-            response = self._client.responses.create(
-                model=self._model,
-                temperature=0.1,
-                input=[{"role": "user", "content": content}],
-            )
             payload = self._parse_json(response.output_text)
             return JobPostingExtractResponse.model_validate(payload)
-        except Exception:
-            return JobPostingExtractResponse(
-                rawText=raw_text or "",
-                confidence=0.0,
-            )
+        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise NonRetryableWorkerError(
+                f"OpenAI extract 응답 검증 실패: {exc}",
+                failure_reason="VALIDATION_ERROR",
+                openai_request_id=self._extract_request_id(response),
+            ) from exc
 
     def classify(
         self,
@@ -48,16 +53,21 @@ class JobPostingOpenAiWorker:
         candidates: list[JobPostingClassificationCandidateResponse],
     ) -> JobPostingClassificationResultResponse:
         prompt = self._build_classification_prompt(extracted, candidates)
+        response = self._create_response(
+            input_payload=prompt,
+            temperature=0.1,
+            operation="classify",
+        )
         try:
-            response = self._client.responses.create(
-                model=self._model,
-                temperature=0.1,
-                input=prompt,
-            )
             payload = self._parse_json(response.output_text)
             return JobPostingClassificationResultResponse.model_validate(payload)
-        except Exception:
+        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             top = candidates[0]
+            logger.warning(
+                "OpenAI classify 응답 검증 실패로 1순위 후보 fallback을 사용합니다. requestId=%s error=%s",
+                self._extract_request_id(response),
+                exc,
+            )
             return JobPostingClassificationResultResponse(
                 detailClassificationId=top.detailClassificationId,
                 detailClassificationName=top.detailClassificationName,
@@ -73,15 +83,20 @@ class JobPostingOpenAiWorker:
         classification: JobPostingClassificationResultResponse,
     ) -> JobPostingGenerateResponse:
         prompt = self._build_generation_prompt(extracted, classification)
+        response = self._create_response(
+            input_payload=prompt,
+            temperature=0.7,
+            operation="generate",
+        )
         try:
-            response = self._client.responses.create(
-                model=self._model,
-                temperature=0.7,
-                input=prompt,
-            )
             payload = self._parse_json(response.output_text)
             return JobPostingGenerateResponse.model_validate(payload)
-        except Exception:
+        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "OpenAI generate 응답 검증 실패로 추출 기반 fallback을 사용합니다. requestId=%s error=%s",
+                self._extract_request_id(response),
+                exc,
+            )
             return JobPostingGenerateResponse(
                 companyName=extracted.companyName,
                 jobTitle=extracted.jobTitle,
@@ -91,11 +106,83 @@ class JobPostingOpenAiWorker:
                 summary="생성 실패로 추출 결과를 기반으로 fallback 응답을 사용했습니다.",
             )
 
+    def _create_response(self, *, input_payload: object, temperature: float, operation: str):
+        try:
+            return self._client.responses.create(
+                model=self._model,
+                temperature=temperature,
+                input=input_payload,
+            )
+        except RateLimitError as exc:
+            raise RetryableWorkerError(
+                f"OpenAI {operation} rate limit 발생: {exc}",
+                failure_reason="RATE_LIMIT",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except APITimeoutError as exc:
+            raise RetryableWorkerError(
+                f"OpenAI {operation} timeout 발생: {exc}",
+                failure_reason="OPENAI_TIMEOUT",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except APIConnectionError as exc:
+            raise RetryableWorkerError(
+                f"OpenAI {operation} connection error 발생: {exc}",
+                failure_reason="OPENAI_TIMEOUT",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except BadRequestError as exc:
+            raise NonRetryableWorkerError(
+                f"OpenAI {operation} 요청 검증 실패: {exc}",
+                failure_reason="VALIDATION_ERROR",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except APIStatusError as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code == 429:
+                raise RetryableWorkerError(
+                    f"OpenAI {operation} rate limit 발생: {exc}",
+                    failure_reason="RATE_LIMIT",
+                    openai_request_id=self._extract_request_id(exc),
+                ) from exc
+            if status_code is not None and status_code >= 500:
+                raise RetryableWorkerError(
+                    f"OpenAI {operation} API 상태 오류: {exc}",
+                    failure_reason="INTERNAL_ERROR",
+                    openai_request_id=self._extract_request_id(exc),
+                ) from exc
+            raise NonRetryableWorkerError(
+                f"OpenAI {operation} 요청 실패: {exc}",
+                failure_reason="VALIDATION_ERROR",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+        except Exception as exc:
+            raise RetryableWorkerError(
+                f"OpenAI {operation} 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
+                failure_reason="INTERNAL_ERROR",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+
     def _parse_json(self, raw_text: str) -> dict:
         start = raw_text.find("{")
         end = raw_text.rfind("}")
         candidate = raw_text[start : end + 1] if start >= 0 and end >= 0 else raw_text
         return json.loads(candidate)
+
+    def _extract_request_id(self, response_or_exc: object) -> str | None:
+        for attr_name in ("_request_id", "request_id", "id"):
+            value = getattr(response_or_exc, attr_name, None)
+            if isinstance(value, str) and value:
+                return value
+
+        response = getattr(response_or_exc, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if headers:
+                request_id = headers.get("x-request-id") or headers.get("request-id")
+                if request_id:
+                    return request_id
+        return None
 
     def _build_extract_prompt(self, raw_text: str, has_image: bool) -> str:
         return f"""

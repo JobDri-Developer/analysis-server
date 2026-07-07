@@ -18,10 +18,13 @@ from app.schemas import (
     JobPostingClassificationCandidateResponse,
     JobPostingExtractResponse,
     JobPostingIngestResponse,
+    JobPostingTaskStatusResponse,
     JobPostingWorkerContextRequest,
     JobPostingWorkerContextResponse,
     JobPostingWorkerFailureRequest,
     JobPostingWorkerFinalizeRequest,
+    JobPostingWorkerRetryRequest,
+    JobPostingWorkerRunningRequest,
     NonRetryableWorkerError,
     RetryableWorkerError,
 )
@@ -39,17 +42,30 @@ class SpringWorkerApiClient:
             }
         )
 
-    def mark_running(self, task_id: str) -> None:
-        self._post(f"/api/internal/worker/job-postings/tasks/{task_id}/running")
+    def mark_job_posting_running(self, task_id: str, request: JobPostingWorkerRunningRequest) -> None:
+        self._post(
+            f"/api/internal/worker/job-postings/tasks/{task_id}/running",
+            request.model_dump(mode="json"),
+        )
 
     def complete_task(self, task_id: str, result: JobPostingIngestResponse) -> JobPostingIngestResponse:
         payload = result.model_dump(mode="json")
         response = self._post(f"/api/internal/worker/job-postings/tasks/{task_id}/complete", payload)
         return self._parse_result(response, JobPostingIngestResponse)
 
-    def fail_task(self, task_id: str, error_message: str) -> None:
-        payload = JobPostingWorkerFailureRequest(errorMessage=error_message).model_dump(mode="json")
+    def retry_job_posting_task(self, task_id: str, request: JobPostingWorkerRetryRequest) -> None:
+        self._post(
+            f"/api/internal/worker/job-postings/tasks/{task_id}/retry",
+            request.model_dump(mode="json"),
+        )
+
+    def fail_job_posting_task(self, task_id: str, request: JobPostingWorkerFailureRequest) -> None:
+        payload = request.model_dump(mode="json")
         self._post(f"/api/internal/worker/job-postings/tasks/{task_id}/failed", payload)
+
+    def get_job_posting_task(self, task_id: str) -> JobPostingTaskStatusResponse:
+        response = self._get(f"/api/internal/worker/job-postings/tasks/{task_id}")
+        return self._parse_result(response, JobPostingTaskStatusResponse)
 
     def get_context(self, user_id: int, image_object_key: str | None) -> JobPostingWorkerContextResponse:
         payload = JobPostingWorkerContextRequest(userId=user_id, imageObjectKey=image_object_key).model_dump(mode="json")
