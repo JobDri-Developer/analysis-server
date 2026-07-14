@@ -140,7 +140,6 @@ class AnalysisTaskMessage(BaseModel):
     taskId: str
     userId: int
     mockApplyId: int
-    creditReferenceId: str
     retryCount: int = 0
     maxRetryCount: int = 0
     submittedAt: str
@@ -201,7 +200,6 @@ class AnalysisWorkerRetryRequest(BaseModel):
     retryCount: int
     workerId: str
     queueLatencyMillis: int | None = None
-    openAiRequestId: str | None = None
 
 
 class AnalysisWorkerFailureRequest(BaseModel):
@@ -210,7 +208,6 @@ class AnalysisWorkerFailureRequest(BaseModel):
     retryCount: int
     workerId: str
     queueLatencyMillis: int | None = None
-    openAiRequestId: str | None = None
 
 
 class AnalysisWorkerCompleteRequest(BaseModel):
@@ -218,7 +215,6 @@ class AnalysisWorkerCompleteRequest(BaseModel):
     mockApplyId: int
     workerId: str
     queueLatencyMillis: int | None = None
-    openAiRequestId: str | None = None
     llmResponse: AnalysisLlmResponse
 
 
