@@ -235,7 +235,6 @@ class RabbitMqConsumer:
                 mockApplyId=message.mockApplyId,
                 workerId=self._worker_id,
                 queueLatencyMillis=queue_latency_millis,
-                openAiRequestId=openai_request_id,
                 llmResponse=llm_response,
             ),
         )
@@ -498,7 +497,6 @@ class RabbitMqConsumer:
                     retryCount=retry_count,
                     workerId=self._worker_id,
                     queueLatencyMillis=queue_latency_millis,
-                    openAiRequestId=openai_request_id,
                 ),
             )
         except Exception:
@@ -530,7 +528,6 @@ class RabbitMqConsumer:
                     retryCount=retry_count,
                     workerId=self._worker_id,
                     queueLatencyMillis=queue_latency_millis,
-                    openAiRequestId=openai_request_id,
                 ),
             )
         except Exception:
