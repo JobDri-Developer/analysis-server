@@ -74,6 +74,6 @@ jobs:
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             export WORKER_IMAGE_NAME="$IMAGE_NAME"
             export WORKER_IMAGE_TAG="$IMAGE_TAG"
-            docker compose -f docker-compose.prod.yml -f docker-compose.worker.prod.yml pull worker
-            docker compose -f docker-compose.prod.yml -f docker-compose.worker.prod.yml up -d worker
+            docker compose -f docker-compose.prod.yml pull worker
+            docker compose -f docker-compose.prod.yml up -d worker
             docker image prune -f
