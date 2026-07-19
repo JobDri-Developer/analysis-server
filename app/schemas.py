@@ -106,6 +106,11 @@ class JobPostingWorkerFinalizeRequest(BaseModel):
     generated: JobPostingGenerateResponse
 
 
+class JobPostingWorkerResultStoreRequest(BaseModel):
+    userId: int
+    result: JobPostingWorkerFinalizeRequest
+
+
 FailureReason = Literal["RATE_LIMIT", "QUEUE_TIMEOUT", "OPENAI_TIMEOUT", "VALIDATION_ERROR", "INTERNAL_ERROR"]
 
 
@@ -218,6 +223,12 @@ class AnalysisWorkerCompleteRequest(BaseModel):
     llmResponse: AnalysisLlmResponse
 
 
+class AnalysisWorkerResultStoreRequest(BaseModel):
+    userId: int
+    mockApplyId: int
+    llmResponse: AnalysisLlmResponse
+
+
 class AnalysisTaskStatusResponse(BaseModel):
     status: str | None = None
     failureReason: FailureReason | None = None
@@ -225,6 +236,21 @@ class AnalysisTaskStatusResponse(BaseModel):
     retryCount: int | None = None
     maxRetryCount: int | None = None
     queueLatencyMillis: int | None = None
+
+
+DeliveryKind = Literal["ANALYSIS_COMPLETE", "JOB_POSTING_FINALIZE"]
+
+
+class PendingDeliveryEntry(BaseModel):
+    version: int = 1
+    taskId: str
+    deliveryKind: DeliveryKind
+    deliveryPath: str
+    payload: dict[str, Any]
+    storedAt: str
+    attemptCount: int = 0
+    lastError: str | None = None
+    nextAttemptAt: str | None = None
 
 
 class RetryableWorkerError(Exception):

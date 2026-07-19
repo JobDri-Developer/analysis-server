@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "ko-KR"
+tone_instructions: "모든 리뷰와 요약은 자연스러운 한국어로 작성하고, 근거 기반으로 핵심 위험과 개선 방향을 명확히 설명하세요."
+early_access: false
+
+reviews:
+  profile: "assertive"
+  high_level_summary: true
+  review_status: true
+  poem: false
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "app/**/*.py"
+      instructions: |
+        다음 관점을 우선순위 높게 검토하세요.
+        - 비동기/백그라운드 처리 안정성: FastAPI 수명주기에서 worker start/stop 안전성, 장시간 blocking I/O로 인한 스레드 점유, 종료 시 stop 누락, 무한 대기, thread starvation, backpressure, queue 적체 가능성
+        - 메시지 처리 신뢰성: ack/nack 순서, 중복 소비 방지, 재시도 횟수 관리, 멱등성, 부분 실패 시 복구 가능성, poison message 대응, DLQ 전파, 장애 후 spool/replay 흐름의 정합성
+        - 외부 연동 성능/회복력: RabbitMQ 연결 복구, HTTP/OpenAI timeout, connection reuse, 불필요한 직렬화/역직렬화, 순차 호출 병목, retry 정책의 과도함/부족함, rate limit 및 대량 요청 시 처리량 저하 가능성
+        - 데이터/파일 일관성: spool 파일 원자성, 동시 접근 안전성, 재기동 후 중복 전달 가능성, long-running transaction 유사 문제, 상태 전이 누락
+        - 코드 완성도: 책임 분리, 예외 처리 일관성, 테스트 용이성, 설정 값의 기본값/필수값 안전성, 유지보수성과 가독성
+        단순 스타일 지적보다 실제 장애 가능성, 처리량 병목, 복구 실패 위험을 우선 보고하세요.
+    - path: "tests/**/*.py"
+      instructions: |
+        테스트가 다음 시나리오를 충분히 검증하는지 중점적으로 확인하세요.
+        - 재시도 한계 초과, timeout, 외부 API 실패, 메시지 중복 수신, partial success 이후 재시작 복구
+        - spool 저장/삭제/replay의 정합성, 멱등성, 종료 중단 후 재처리, 예외 발생 시 상태 보존
+        - 해피패스만 있는 경우 경계 조건과 회귀 위험을 지적하세요.
+    - path: "deploy/**/*.yml"
+      instructions: |
+        운영 배포 관점에서 다음을 우선 검토하세요.
+        - 환경 변수 누락/오타, 민감정보 노출, worker 수 증가 시 중복 처리 및 처리량 영향
+        - health check, restart 정책, graceful shutdown, volume 경로와 spool 영속성, 로그/리소스 제한 설정의 운영 리스크
+    - path: "Dockerfile"
+      instructions: |
+        이미지 빌드와 런타임 안정성을 검토하세요.
+        - 불필요하게 큰 이미지, 캐시 비효율, 실행 사용자 권한, 타임존/locale 의존성, SIGTERM 처리와 엔트리포인트 동작, 런타임 의존성 누락 가능성을 우선 확인하세요.
+    - path: "requirements.txt"
+      instructions: |
+        의존성 버전 고정 수준, 취약하거나 과도하게 느슨한 버전 범위, 런타임에 필요한 패키지 누락 여부를 점검하세요.
+    - path: "docs/**/*.md"
+      instructions: |
+        실제 현재 코드와 배포 절차가 문서와 일치하는지 확인하세요.
+        - 큐 이름, 환경 변수, 복구 절차, 실행 명령, 장애 대응 플로우가 코드와 어긋나면 운영 혼선을 초래할 수 있으니 우선 지적하세요.
+
+chat:
+  auto_reply: true
