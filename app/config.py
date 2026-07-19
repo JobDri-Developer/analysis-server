@@ -48,6 +48,14 @@ class Settings(BaseSettings):
         default=300000,
         alias="APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS",
     )
+    worker_api_retry_max_attempts: int = Field(default=5, alias="APP_WORKER_API_RETRY_MAX_ATTEMPTS")
+    worker_api_retry_base_delay_millis: int = Field(default=500, alias="APP_WORKER_API_RETRY_BASE_DELAY_MILLIS")
+    worker_api_retry_max_delay_millis: int = Field(default=10000, alias="APP_WORKER_API_RETRY_MAX_DELAY_MILLIS")
+    worker_recovery_spool_dir: str = Field(default=".worker-spool", alias="APP_WORKER_RECOVERY_SPOOL_DIR")
+    worker_recovery_poll_interval_seconds: int = Field(
+        default=15,
+        alias="APP_WORKER_RECOVERY_POLL_INTERVAL_SECONDS",
+    )
 
 
 settings = Settings()

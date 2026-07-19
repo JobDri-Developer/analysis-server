@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, TypeVar
 
 import requests
-from pydantic import BaseModel, TypeAdapter
+from pydantic import TypeAdapter
 
 from app.config import settings
 from app.schemas import (
@@ -12,6 +12,7 @@ from app.schemas import (
     AnalysisWorkerContextRequest,
     AnalysisWorkerContextResponse,
     AnalysisWorkerFailureRequest,
+    AnalysisWorkerResultStoreRequest,
     AnalysisWorkerRetryRequest,
     AnalysisWorkerRunningRequest,
     ApiEnvelope,
@@ -23,6 +24,7 @@ from app.schemas import (
     JobPostingWorkerContextResponse,
     JobPostingWorkerFailureRequest,
     JobPostingWorkerFinalizeRequest,
+    JobPostingWorkerResultStoreRequest,
     JobPostingWorkerRetryRequest,
     JobPostingWorkerRunningRequest,
     NonRetryableWorkerError,
@@ -53,6 +55,13 @@ class SpringWorkerApiClient:
         response = self._post(f"/api/internal/worker/job-postings/tasks/{task_id}/complete", payload)
         return self._parse_result(response, JobPostingIngestResponse)
 
+    def store_job_posting_result(self, task_id: str, request: JobPostingWorkerResultStoreRequest) -> None:
+        self._post(
+            f"/api/internal/worker/job-postings/tasks/{task_id}/result",
+            request.model_dump(mode="json"),
+            idempotent_conflict_as_success=True,
+        )
+
     def retry_job_posting_task(self, task_id: str, request: JobPostingWorkerRetryRequest) -> None:
         self._post(
             f"/api/internal/worker/job-postings/tasks/{task_id}/retry",
@@ -81,12 +90,12 @@ class SpringWorkerApiClient:
         )
         return self._parse_result(response, list[JobPostingClassificationCandidateResponse])
 
-    def finalize(self, request: JobPostingWorkerFinalizeRequest) -> JobPostingIngestResponse:
-        response = self._post(
+    def finalize(self, request: JobPostingWorkerFinalizeRequest) -> None:
+        self._post(
             "/api/internal/worker/job-postings/ingest/finalize",
             request.model_dump(mode="json"),
+            idempotent_conflict_as_success=True,
         )
-        return self._parse_result(response, JobPostingIngestResponse)
 
     def mark_analysis_running(self, task_id: str, request: AnalysisWorkerRunningRequest) -> None:
         self._post(
@@ -117,25 +126,56 @@ class SpringWorkerApiClient:
         self._post(
             f"/api/internal/worker/analysis/tasks/{task_id}/complete",
             request.model_dump(mode="json"),
+            idempotent_conflict_as_success=True,
+        )
+
+    def store_analysis_result(self, task_id: str, request: AnalysisWorkerResultStoreRequest) -> None:
+        self._post(
+            f"/api/internal/worker/analysis/tasks/{task_id}/result",
+            request.model_dump(mode="json"),
+            idempotent_conflict_as_success=True,
         )
 
     def get_analysis_task(self, task_id: str) -> AnalysisTaskStatusResponse:
         response = self._get(f"/api/internal/worker/analysis/tasks/{task_id}")
         return self._parse_result(response, AnalysisTaskStatusResponse)
 
-    def _post(self, path: str, payload: dict[str, Any] | None = None) -> ApiEnvelope:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        idempotent_conflict_as_success: bool = False,
+    ) -> ApiEnvelope:
         url = settings.spring_api_base_url.rstrip("/") + path
         try:
             response = self._session.post(url, json=payload, timeout=30)
         except requests.RequestException as exc:
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 
+        if response.status_code == 409 and idempotent_conflict_as_success:
+            return ApiEnvelope(
+                isSuccess=True,
+                code="IDEMPOTENT_CONFLICT",
+                message="409 conflict를 멱등 성공으로 처리했습니다.",
+                result=None,
+                error=None,
+            )
         if response.status_code >= 500:
             raise RetryableWorkerError(f"Spring API 서버 오류: {response.status_code}")
 
         try:
-            envelope = ApiEnvelope.model_validate(response.json())
+            payload_data = response.json()
         except Exception as exc:
+            if 400 <= response.status_code < 500:
+                raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
+            raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
+
+        try:
+            envelope = ApiEnvelope.model_validate(payload_data)
+        except Exception as exc:
+            if 400 <= response.status_code < 500:
+                raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
 
         if not envelope.isSuccess:
@@ -153,8 +193,17 @@ class SpringWorkerApiClient:
             raise RetryableWorkerError(f"Spring API 서버 오류: {response.status_code}")
 
         try:
-            envelope = ApiEnvelope.model_validate(response.json())
+            payload_data = response.json()
         except Exception as exc:
+            if 400 <= response.status_code < 500:
+                raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
+            raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
+
+        try:
+            envelope = ApiEnvelope.model_validate(payload_data)
+        except Exception as exc:
+            if 400 <= response.status_code < 500:
+                raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
 
         if not envelope.isSuccess:

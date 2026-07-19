@@ -1,0 +1,268 @@
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+os.environ.setdefault("APP_WORKER_INTERNAL_API_KEY", "test-internal-key")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+
+if "requests" not in sys.modules:
+    requests_stub = types.ModuleType("requests")
+
+    class RequestException(Exception):
+        pass
+
+    class Session:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def post(self, *args, **kwargs):
+            raise NotImplementedError
+
+        def get(self, *args, **kwargs):
+            raise NotImplementedError
+
+    requests_stub.RequestException = RequestException
+    requests_stub.Session = Session
+    sys.modules["requests"] = requests_stub
+
+if "pika" not in sys.modules:
+    pika_stub = types.ModuleType("pika")
+
+    class BasicProperties:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    class PlainCredentials:
+        def __init__(self, username: str, password: str) -> None:
+            self.username = username
+            self.password = password
+
+    class ConnectionParameters:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class BlockingConnection:
+        def __init__(self, parameters) -> None:
+            self.parameters = parameters
+
+    class BlockingChannel:
+        pass
+
+    pika_stub.BasicProperties = BasicProperties
+    pika_stub.PlainCredentials = PlainCredentials
+    pika_stub.ConnectionParameters = ConnectionParameters
+    pika_stub.BlockingConnection = BlockingConnection
+    pika_stub.adapters = types.SimpleNamespace(
+        blocking_connection=types.SimpleNamespace(BlockingChannel=BlockingChannel)
+    )
+    sys.modules["pika"] = pika_stub
+
+if "openai" not in sys.modules:
+    openai_stub = types.ModuleType("openai")
+
+    class OpenAiError(Exception):
+        pass
+
+    class APIConnectionError(OpenAiError):
+        pass
+
+    class APIStatusError(OpenAiError):
+        status_code = None
+
+    class APITimeoutError(OpenAiError):
+        pass
+
+    class BadRequestError(OpenAiError):
+        pass
+
+    class RateLimitError(OpenAiError):
+        pass
+
+    class OpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            self.responses = types.SimpleNamespace(create=lambda **_: None)
+
+    openai_stub.APIConnectionError = APIConnectionError
+    openai_stub.APIStatusError = APIStatusError
+    openai_stub.APITimeoutError = APITimeoutError
+    openai_stub.BadRequestError = BadRequestError
+    openai_stub.OpenAI = OpenAI
+    openai_stub.RateLimitError = RateLimitError
+    sys.modules["openai"] = openai_stub
+
+from app.api_client import SpringWorkerApiClient
+from app.config import settings
+from app.consumer import RabbitMqConsumer
+from app.recovery import PendingDeliveryStore
+from app.schemas import (
+    AnalysisLlmResponse,
+    AnalysisQuestionAnalysisResponse,
+    AnalysisTaskMessage,
+    AnalysisWorkerCompleteRequest,
+    AnalysisWorkerResultStoreRequest,
+    PendingDeliveryEntry,
+    RetryableWorkerError,
+)
+
+
+class FakeApiClient:
+    def __init__(self, *, complete_should_fail: bool = False) -> None:
+        self.complete_should_fail = complete_should_fail
+        self.store_analysis_calls: list[tuple[str, AnalysisWorkerResultStoreRequest]] = []
+        self.complete_analysis_calls: list[tuple[str, AnalysisWorkerCompleteRequest]] = []
+
+    def store_analysis_result(self, task_id: str, request: AnalysisWorkerResultStoreRequest) -> None:
+        self.store_analysis_calls.append((task_id, request))
+
+    def complete_analysis_task(self, task_id: str, request: AnalysisWorkerCompleteRequest) -> None:
+        self.complete_analysis_calls.append((task_id, request))
+        if self.complete_should_fail:
+            raise RetryableWorkerError("complete timeout")
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class RecoveryFlowTests(unittest.TestCase):
+    def _build_llm_response(self) -> AnalysisLlmResponse:
+        return AnalysisLlmResponse(
+            jobFit=80,
+            impact=75,
+            completeness=90,
+            feedback="good",
+            questionAnalyses=[
+                AnalysisQuestionAnalysisResponse(
+                    questionId=1,
+                    sentence="answer",
+                    status="OK",
+                    reason="clear",
+                    improvement="none",
+                )
+            ],
+        )
+
+    def _build_message(self) -> AnalysisTaskMessage:
+        return AnalysisTaskMessage(
+            messageId="m-1",
+            taskType="ANALYSIS",
+            taskId="task-1",
+            userId=10,
+            mockApplyId=20,
+            retryCount=0,
+            maxRetryCount=3,
+            submittedAt="2026-07-19T00:00:00Z",
+        )
+
+    def test_store_success_then_complete_failure_keeps_pending_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = FakeApiClient(complete_should_fail=True)
+            store = PendingDeliveryStore(temp_dir)
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                recovery_store=store,
+                sleep_fn=lambda _: None,
+            )
+            message = self._build_message()
+            llm_response = self._build_llm_response()
+
+            with patch.object(settings, "worker_api_retry_max_attempts", 1):
+                consumer._store_analysis_result(message, llm_response)
+                pending_entry = consumer._enqueue_pending_delivery(
+                    task_id=message.taskId,
+                    delivery_kind="ANALYSIS_COMPLETE",
+                    delivery_path=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
+                    payload=consumer._build_analysis_complete_request(
+                        message,
+                        llm_response,
+                        queue_latency_millis=123,
+                    ).model_dump(mode="json"),
+                    retry_count=message.retryCount,
+                )
+                delivered = consumer._deliver_pending_entry(
+                    pending_entry,
+                    retry_count=message.retryCount,
+                    replayed=False,
+                )
+
+            self.assertFalse(delivered)
+            self.assertEqual(len(api_client.store_analysis_calls), 1)
+            self.assertEqual(len(api_client.complete_analysis_calls), 1)
+            pending_entries = store.list_entries()
+            self.assertEqual(len(pending_entries), 1)
+            self.assertEqual(pending_entries[0].taskId, message.taskId)
+            self.assertEqual(pending_entries[0].deliveryKind, "ANALYSIS_COMPLETE")
+
+    def test_recovery_replays_pending_delivery_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = PendingDeliveryStore(temp_dir)
+            message = self._build_message()
+            llm_response = self._build_llm_response()
+            request = AnalysisWorkerCompleteRequest(
+                userId=message.userId,
+                mockApplyId=message.mockApplyId,
+                workerId="worker-1",
+                queueLatencyMillis=321,
+                llmResponse=llm_response,
+            )
+            store.upsert(
+                PendingDeliveryEntry(
+                    taskId=message.taskId,
+                    deliveryKind="ANALYSIS_COMPLETE",
+                    deliveryPath=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
+                    payload=request.model_dump(mode="json"),
+                    storedAt="2026-07-19T00:00:00+00:00",
+                )
+            )
+
+            api_client = FakeApiClient(complete_should_fail=False)
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                recovery_store=store,
+                sleep_fn=lambda _: None,
+            )
+
+            with patch.object(settings, "worker_api_retry_max_attempts", 1):
+                consumer._recover_pending_deliveries()
+
+            self.assertEqual(len(api_client.complete_analysis_calls), 1)
+            self.assertEqual(store.list_entries(), [])
+
+    def test_store_analysis_result_treats_conflict_as_success(self) -> None:
+        client = SpringWorkerApiClient()
+        client._session.post = lambda *args, **kwargs: FakeResponse(
+            409,
+            {
+                "isSuccess": False,
+                "code": "ALREADY_EXISTS",
+                "message": "already stored",
+                "result": None,
+                "error": "conflict",
+            },
+        )
+
+        request = AnalysisWorkerResultStoreRequest(
+            userId=1,
+            mockApplyId=2,
+            llmResponse=self._build_llm_response(),
+        )
+
+        client.store_analysis_result("task-1", request)
+
+
+if __name__ == "__main__":
+    unittest.main()
