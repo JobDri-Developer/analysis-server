@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     worker_api_retry_base_delay_millis: int = Field(default=500, alias="APP_WORKER_API_RETRY_BASE_DELAY_MILLIS")
     worker_api_retry_max_delay_millis: int = Field(default=10000, alias="APP_WORKER_API_RETRY_MAX_DELAY_MILLIS")
     worker_recovery_spool_dir: str = Field(default=".worker-spool", alias="APP_WORKER_RECOVERY_SPOOL_DIR")
+    worker_terminal_message_dir: str = Field(
+        default=".worker-spool/terminal-messages",
+        alias="APP_WORKER_TERMINAL_MESSAGE_DIR",
+    )
     worker_recovery_poll_interval_seconds: int = Field(
         default=15,
         alias="APP_WORKER_RECOVERY_POLL_INTERVAL_SECONDS",

@@ -5,7 +5,7 @@ import logging
 
 class WorkerContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        for field_name in ("taskId", "workerId", "retryCount"):
+        for field_name in ("taskId", "messageId", "workerId", "retryCount"):
             if not hasattr(record, field_name):
                 setattr(record, field_name, "-")
         return True
@@ -16,7 +16,7 @@ def configure_worker_logging() -> None:
         level=logging.INFO,
         format=(
             "%(asctime)s %(levelname)s [%(name)s] "
-            "[taskId=%(taskId)s workerId=%(workerId)s retryCount=%(retryCount)s] %(message)s"
+            "[taskId=%(taskId)s messageId=%(messageId)s workerId=%(workerId)s retryCount=%(retryCount)s] %(message)s"
         ),
     )
 

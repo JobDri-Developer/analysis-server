@@ -15,8 +15,9 @@ import pika
 from app.api_client import SpringWorkerApiClient
 from app.config import settings
 from app.openai_client import AnalysisOpenAiWorker, JobPostingOpenAiWorker
-from app.recovery import PendingDeliveryStore
+from app.recovery import PendingDeliveryStore, TerminalMessageStore
 from app.schemas import (
+    AnalysisTaskStatusResponse,
     AnalysisLlmResponse,
     AnalysisTaskMessage,
     AnalysisWorkerCompleteRequest,
@@ -36,12 +37,14 @@ from app.schemas import (
     JobPostingWorkerResultStoreRequest,
     JobPostingWorkerRetryRequest,
     JobPostingWorkerRunningRequest,
+    JobPostingTaskStatusResponse,
     NonRetryableWorkerError,
     PendingDeliveryEntry,
     RetryableWorkerError,
 )
 
 logger = logging.getLogger(__name__)
+TERMINAL_TASK_STATUSES = {"FAILED", "SUCCEEDED", "SUCCESS", "COMPLETED", "COMPLETE", "CANCELLED"}
 
 
 class RabbitMqConsumer:
@@ -52,6 +55,7 @@ class RabbitMqConsumer:
         openai_worker: JobPostingOpenAiWorker | None = None,
         analysis_openai_worker: AnalysisOpenAiWorker | None = None,
         recovery_store: PendingDeliveryStore | None = None,
+        terminal_message_store: TerminalMessageStore | None = None,
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         self._thread: threading.Thread | None = None
@@ -64,6 +68,7 @@ class RabbitMqConsumer:
         self._openai_worker = openai_worker or JobPostingOpenAiWorker()
         self._analysis_openai_worker = analysis_openai_worker or AnalysisOpenAiWorker()
         self._recovery_store = recovery_store or PendingDeliveryStore(settings.worker_recovery_spool_dir)
+        self._terminal_message_store = terminal_message_store or TerminalMessageStore(settings.worker_terminal_message_dir)
         self._sleep_fn = sleep_fn or (lambda seconds: self._stop_event.wait(seconds))
         self._worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self._inflight_task_ids: set[str] = set()
@@ -155,7 +160,7 @@ class RabbitMqConsumer:
                 raw_body[:2000],
                 extra={"workerId": self._worker_id},
             )
-            channel.basic_ack(delivery_tag=method.delivery_tag)
+            self._ack_message(channel, method.delivery_tag, reason="invalid-payload")
             return
 
         if not self._register_inflight(message.taskId):
@@ -163,15 +168,21 @@ class RabbitMqConsumer:
                 "동일 taskId가 이미 처리 중이어서 메시지를 재큐잉합니다.",
                 extra=self._log_context(message),
             )
-            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            self._nack_message(channel, method.delivery_tag, requeue=True, reason="task-already-inflight", message=message)
             return
 
         try:
+            logger.info(
+                "RabbitMQ 메시지 소비를 시작합니다. deliveryTag=%s redelivered=%s",
+                getattr(method, "delivery_tag", "-"),
+                getattr(method, "redelivered", False),
+                extra=self._log_context(message),
+            )
             if isinstance(message, AnalysisTaskMessage):
                 self._process_analysis_task(message)
             else:
                 self._process_job_posting_task(message)
-            channel.basic_ack(delivery_tag=method.delivery_tag)
+            self._ack_message(channel, method.delivery_tag, reason="processed-successfully", message=message)
         except NonRetryableWorkerError as exc:
             logger.warning(
                 "비재시도 에러로 작업을 실패 처리합니다. error=%s",
@@ -441,7 +452,7 @@ class RabbitMqConsumer:
             logger.info(
                 "pending delivery를 recovery spool에 기록했습니다. deliveryKind=%s",
                 delivery_kind,
-                extra=self._delivery_log_context(task_id, retry_count),
+                extra=self._delivery_log_context(task_id, None, retry_count),
             )
             return entry
         except Exception as exc:
@@ -458,7 +469,7 @@ class RabbitMqConsumer:
             "%s 전달을 시작합니다. replayed=%s",
             entry.deliveryKind,
             replayed,
-            extra=self._delivery_log_context(entry.taskId, retry_count),
+            extra=self._delivery_log_context(entry.taskId, None, retry_count),
         )
 
         def action() -> None:
@@ -498,7 +509,7 @@ class RabbitMqConsumer:
             "%s 전달이 완료되었습니다. replayed=%s",
             entry.deliveryKind,
             replayed,
-            extra=self._delivery_log_context(entry.taskId, retry_count),
+            extra=self._delivery_log_context(entry.taskId, None, retry_count),
         )
         return True
 
@@ -532,13 +543,13 @@ class RabbitMqConsumer:
                             "recovery spool 재전송이 아직 완료되지 않았습니다. nextAttemptAt=%s lastError=%s",
                             entry.nextAttemptAt,
                             entry.lastError,
-                            extra=self._delivery_log_context(entry.taskId, entry.attemptCount),
+                            extra=self._delivery_log_context(entry.taskId, None, entry.attemptCount),
                         )
                 except NonRetryableWorkerError:
                     logger.exception(
                         "recovery spool 항목 재전송이 비재시도 오류로 종료되었습니다. deliveryKind=%s",
                         entry.deliveryKind,
-                        extra=self._delivery_log_context(entry.taskId, entry.attemptCount),
+                        extra=self._delivery_log_context(entry.taskId, None, entry.attemptCount),
                     )
                 finally:
                     self._release_inflight(entry.taskId)
@@ -569,7 +580,7 @@ class RabbitMqConsumer:
                     attempt,
                     self._elapsed_millis(started_at),
                     replayed,
-                    extra=self._delivery_log_context(task_id, retry_count),
+                    extra=self._delivery_log_context(task_id, None, retry_count),
                 )
                 return result
             except RetryableWorkerError as exc:
@@ -587,7 +598,7 @@ class RabbitMqConsumer:
                     next_attempt_at,
                     exc,
                     replayed,
-                    extra=self._delivery_log_context(task_id, retry_count),
+                    extra=self._delivery_log_context(task_id, None, retry_count),
                 )
                 if on_retryable_error is not None:
                     on_retryable_error(attempt, str(exc), next_attempt_at)
@@ -602,7 +613,7 @@ class RabbitMqConsumer:
                     self._elapsed_millis(started_at),
                     exc,
                     replayed,
-                    extra=self._delivery_log_context(task_id, retry_count),
+                    extra=self._delivery_log_context(task_id, None, retry_count),
                 )
                 raise
 
@@ -653,18 +664,19 @@ class RabbitMqConsumer:
 
         if isinstance(message, AnalysisTaskMessage):
             if next_retry_count > max_retry_count:
-                self._safe_fail_analysis_task(
+                self._finalize_failed_message(
+                    channel,
+                    delivery_tag,
+                    properties,
                     message,
-                    str(error),
-                    error.failure_reason,
-                    next_retry_count,
-                    queue_latency_millis,
-                    error.openai_request_id,
+                    body,
+                    error_message=str(error),
+                    failure_reason=error.failure_reason,
+                    retry_count=next_retry_count,
+                    queue_latency_millis=queue_latency_millis,
+                    openai_request_id=error.openai_request_id,
+                    outcome_reason="retry-exhausted",
                 )
-                if self._publish_dlq(channel, body, properties, message):
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                else:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                 return
 
             self._safe_retry_analysis_task(
@@ -677,17 +689,19 @@ class RabbitMqConsumer:
             )
         else:
             if next_retry_count > max_retry_count:
-                self._safe_fail_job_posting_task(
+                self._finalize_failed_message(
+                    channel,
+                    delivery_tag,
+                    properties,
                     message,
-                    str(error),
-                    error.failure_reason,
-                    next_retry_count,
-                    queue_latency_millis,
+                    body,
+                    error_message=str(error),
+                    failure_reason=error.failure_reason,
+                    retry_count=next_retry_count,
+                    queue_latency_millis=queue_latency_millis,
+                    openai_request_id=None,
+                    outcome_reason="retry-exhausted",
                 )
-                if self._publish_dlq(channel, body, properties, message):
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                else:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
                 return
             self._safe_retry_job_posting_task(
                 message,
@@ -716,9 +730,9 @@ class RabbitMqConsumer:
             ),
         )
         if published:
-            channel.basic_ack(delivery_tag=delivery_tag)
+            self._ack_message(channel, delivery_tag, reason="republished-for-retry", message=message)
             return
-        channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+        self._nack_message(channel, delivery_tag, requeue=True, reason="retry-republish-failed", message=message)
 
     def _handle_non_retryable(
         self,
@@ -731,32 +745,35 @@ class RabbitMqConsumer:
     ) -> None:
         if isinstance(message, AnalysisTaskMessage):
             queue_latency_millis = error.queue_latency_millis or self._safe_compute_queue_latency(message.submittedAt)
-            self._safe_fail_analysis_task(
+            self._finalize_failed_message(
+                channel,
+                delivery_tag,
+                properties,
                 message,
-                str(error),
-                error.failure_reason,
-                message.retryCount,
-                queue_latency_millis,
-                error.openai_request_id,
+                body,
+                error_message=str(error),
+                failure_reason=error.failure_reason,
+                retry_count=message.retryCount,
+                queue_latency_millis=queue_latency_millis,
+                openai_request_id=error.openai_request_id,
+                outcome_reason="non-retryable-error",
             )
-            if self._publish_dlq(channel, body, properties, message):
-                channel.basic_ack(delivery_tag=delivery_tag)
-                return
-            channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
             return
 
         queue_latency_millis = error.queue_latency_millis or self._safe_compute_queue_latency(message.submittedAt)
-        self._safe_fail_job_posting_task(
+        self._finalize_failed_message(
+            channel,
+            delivery_tag,
+            properties,
             message,
-            str(error),
-            error.failure_reason,
-            message.retryCount,
-            queue_latency_millis,
+            body,
+            error_message=str(error),
+            failure_reason=error.failure_reason,
+            retry_count=message.retryCount,
+            queue_latency_millis=queue_latency_millis,
+            openai_request_id=None,
+            outcome_reason="non-retryable-error",
         )
-        if self._publish_dlq(channel, body, properties, message):
-            channel.basic_ack(delivery_tag=delivery_tag)
-            return
-        channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
 
     def _resolve_publish_target(self, message: JobPostingIngestTaskMessage | AnalysisTaskMessage) -> tuple[str, str]:
         if isinstance(message, AnalysisTaskMessage):
@@ -787,6 +804,148 @@ class RabbitMqConsumer:
                 headers=getattr(properties, "headers", None),
             ),
         )
+
+    def _finalize_failed_message(
+        self,
+        channel,
+        delivery_tag: int,
+        properties: Any,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+        body: bytes,
+        *,
+        error_message: str,
+        failure_reason: str,
+        retry_count: int,
+        queue_latency_millis: int | None,
+        openai_request_id: str | None,
+        outcome_reason: str,
+    ) -> None:
+        if self._terminal_message_store.contains(message.taskId, message.messageId):
+            logger.warning(
+                "이미 terminal 처리된 메시지여서 추가 실패 처리와 DLQ 적재를 건너뜁니다. failureReason=%s outcome=%s",
+                failure_reason,
+                outcome_reason,
+                extra=self._log_context(message, retry_count),
+            )
+            self._ack_message(channel, delivery_tag, reason="already-terminal-message", message=message)
+            return
+
+        if self._is_task_already_terminal(message):
+            logger.warning(
+                "이미 terminal 상태인 task여서 추가 실패 처리와 DLQ 적재를 건너뜁니다. failureReason=%s outcome=%s",
+                failure_reason,
+                outcome_reason,
+                extra=self._log_context(message, retry_count),
+            )
+            self._ack_message(channel, delivery_tag, reason="already-terminal-task", message=message)
+            return
+
+        if isinstance(message, AnalysisTaskMessage):
+            self._safe_fail_analysis_task(
+                message,
+                error_message,
+                failure_reason,
+                retry_count,
+                queue_latency_millis,
+                openai_request_id,
+            )
+        else:
+            self._safe_fail_job_posting_task(
+                message,
+                error_message,
+                failure_reason,
+                retry_count,
+                queue_latency_millis,
+            )
+
+        published = self._publish_dlq_once(channel, body, properties, message, failure_reason=failure_reason)
+        if published:
+            self._ack_message(channel, delivery_tag, reason=f"{outcome_reason}-dlq-published", message=message)
+            return
+        self._nack_message(
+            channel,
+            delivery_tag,
+            requeue=True,
+            reason=f"{outcome_reason}-dlq-publish-failed",
+            message=message,
+        )
+
+    def _publish_dlq_once(
+        self,
+        channel,
+        body: bytes,
+        properties: Any,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+        *,
+        failure_reason: str,
+    ) -> bool:
+        if self._terminal_message_store.contains(message.taskId, message.messageId):
+            logger.warning(
+                "이미 DLQ 적재된 메시지여서 중복 publish를 건너뜁니다. failureReason=%s",
+                failure_reason,
+                extra=self._log_context(message),
+            )
+            return True
+
+        logger.info(
+            "DLQ publish를 시도합니다. failureReason=%s",
+            failure_reason,
+            extra=self._log_context(message),
+        )
+        published = self._publish_dlq(channel, body, properties, message)
+        logger.info(
+            "DLQ publish 결과입니다. published=%s failureReason=%s",
+            published,
+            failure_reason,
+            extra=self._log_context(message),
+        )
+        if not published:
+            return False
+
+        try:
+            self._terminal_message_store.record(
+                task_id=message.taskId,
+                message_id=message.messageId,
+                task_type=message.taskType,
+                failure_reason=failure_reason,
+            )
+        except Exception:
+            logger.exception(
+                "terminal message ledger 기록에 실패했습니다.",
+                extra=self._log_context(message),
+            )
+            return True
+        return True
+
+    def _is_task_already_terminal(self, message: JobPostingIngestTaskMessage | AnalysisTaskMessage) -> bool:
+        try:
+            task_status = self._get_task_status(message)
+        except Exception:
+            logger.exception(
+                "task terminal 상태 확인에 실패했습니다. 보수적으로 실패 처리 경로를 계속 진행합니다.",
+                extra=self._log_context(message),
+            )
+            return False
+
+        status = (task_status.status or "").upper()
+        if status not in TERMINAL_TASK_STATUSES:
+            return False
+
+        logger.info(
+            "task terminal 상태를 확인했습니다. status=%s failureReason=%s",
+            task_status.status,
+            task_status.failureReason,
+            extra=self._log_context(message),
+        )
+        return True
+
+    def _get_task_status(
+        self,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+    ) -> JobPostingTaskStatusResponse | AnalysisTaskStatusResponse:
+        if isinstance(message, AnalysisTaskMessage):
+            return self._api_client.get_analysis_task(message.taskId)
+        return self._api_client.get_job_posting_task(message.taskId)
 
     def _safe_retry_job_posting_task(
         self,
@@ -964,6 +1123,40 @@ class RabbitMqConsumer:
             )
             return False
 
+    def _ack_message(
+        self,
+        channel,
+        delivery_tag: int,
+        *,
+        reason: str,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage | None = None,
+    ) -> None:
+        logger.info(
+            "RabbitMQ ack를 수행합니다. deliveryTag=%s reason=%s",
+            delivery_tag,
+            reason,
+            extra=self._log_context(message) if message is not None else {"workerId": self._worker_id},
+        )
+        channel.basic_ack(delivery_tag=delivery_tag)
+
+    def _nack_message(
+        self,
+        channel,
+        delivery_tag: int,
+        *,
+        requeue: bool,
+        reason: str,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage | None = None,
+    ) -> None:
+        logger.warning(
+            "RabbitMQ nack를 수행합니다. deliveryTag=%s requeue=%s reason=%s",
+            delivery_tag,
+            requeue,
+            reason,
+            extra=self._log_context(message) if message is not None else {"workerId": self._worker_id},
+        )
+        channel.basic_nack(delivery_tag=delivery_tag, requeue=requeue)
+
     def _register_inflight(self, task_id: str) -> bool:
         with self._inflight_lock:
             if task_id in self._inflight_task_ids:
@@ -977,17 +1170,26 @@ class RabbitMqConsumer:
 
     def _log_context(
         self,
-        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage | None,
         retry_count: int | None = None,
     ) -> dict[str, str | int]:
+        if message is None:
+            return {
+                "taskId": "-",
+                "messageId": "-",
+                "workerId": self._worker_id,
+                "retryCount": retry_count if retry_count is not None else "-",
+            }
         return self._delivery_log_context(
             message.taskId,
+            message.messageId,
             retry_count if retry_count is not None else message.retryCount,
         )
 
-    def _delivery_log_context(self, task_id: str, retry_count: int) -> dict[str, str | int]:
+    def _delivery_log_context(self, task_id: str, message_id: str | None, retry_count: int) -> dict[str, str | int]:
         return {
             "taskId": task_id,
+            "messageId": message_id or "-",
             "workerId": self._worker_id,
             "retryCount": retry_count,
         }

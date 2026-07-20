@@ -101,12 +101,14 @@ from app.api_client import SpringWorkerApiClient
 from app.config import settings
 from app.consumer import RabbitMqConsumer
 from app.logging_utils import WorkerContextFilter
-from app.recovery import PendingDeliveryStore
+from app.recovery import PendingDeliveryStore, TerminalMessageStore
 from app.schemas import (
     AnalysisLlmResponse,
     AnalysisQuestionAnalysisResponse,
     AnalysisTaskMessage,
+    AnalysisTaskStatusResponse,
     AnalysisWorkerCompleteRequest,
+    AnalysisWorkerFailureRequest,
     AnalysisWorkerResultStoreRequest,
     PendingDeliveryEntry,
     RetryableWorkerError,
@@ -114,10 +116,17 @@ from app.schemas import (
 
 
 class FakeApiClient:
-    def __init__(self, *, complete_should_fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        complete_should_fail: bool = False,
+        analysis_task_status: str | None = None,
+    ) -> None:
         self.complete_should_fail = complete_should_fail
+        self.analysis_task_status = analysis_task_status
         self.store_analysis_calls: list[tuple[str, AnalysisWorkerResultStoreRequest]] = []
         self.complete_analysis_calls: list[tuple[str, AnalysisWorkerCompleteRequest]] = []
+        self.fail_analysis_calls: list[tuple[str, AnalysisWorkerFailureRequest]] = []
 
     def store_analysis_result(self, task_id: str, request: AnalysisWorkerResultStoreRequest) -> None:
         self.store_analysis_calls.append((task_id, request))
@@ -126,6 +135,16 @@ class FakeApiClient:
         self.complete_analysis_calls.append((task_id, request))
         if self.complete_should_fail:
             raise RetryableWorkerError("complete timeout")
+
+    def fail_analysis_task(self, task_id: str, request: AnalysisWorkerFailureRequest) -> None:
+        self.fail_analysis_calls.append((task_id, request))
+        self.analysis_task_status = "FAILED"
+
+    def get_analysis_task(self, task_id: str) -> AnalysisTaskStatusResponse:
+        return AnalysisTaskStatusResponse(
+            status=self.analysis_task_status,
+            failureReason="QUEUE_TIMEOUT" if self.analysis_task_status == "FAILED" else None,
+        )
 
 
 class FakeResponse:
@@ -140,14 +159,24 @@ class FakeResponse:
 class FakeChannel:
     def __init__(self) -> None:
         self.acked_delivery_tags: list[int] = []
+        self.nacked_delivery_tags: list[tuple[int, bool]] = []
+        self.published_messages: list[dict[str, object]] = []
 
     def basic_ack(self, delivery_tag: int) -> None:
         self.acked_delivery_tags.append(delivery_tag)
 
+    def basic_nack(self, delivery_tag: int, requeue: bool) -> None:
+        self.nacked_delivery_tags.append((delivery_tag, requeue))
+
+    def basic_publish(self, **kwargs):
+        self.published_messages.append(kwargs)
+        return True
+
 
 class FakeMethod:
-    def __init__(self, delivery_tag: int = 1) -> None:
+    def __init__(self, delivery_tag: int = 1, redelivered: bool = False) -> None:
         self.delivery_tag = delivery_tag
+        self.redelivered = redelivered
 
 
 class RecoveryFlowTests(unittest.TestCase):
@@ -343,6 +372,7 @@ class RecoveryFlowTests(unittest.TestCase):
 
         self.assertTrue(WorkerContextFilter().filter(log_record))
         self.assertEqual(log_record.taskId, "-")
+        self.assertEqual(log_record.messageId, "-")
         self.assertEqual(log_record.workerId, "-")
         self.assertEqual(log_record.retryCount, "-")
 
@@ -371,6 +401,54 @@ class RecoveryFlowTests(unittest.TestCase):
         consumer._on_message(channel, method, None, invalid_message_body)
 
         self.assertEqual(channel.acked_delivery_tags, [99])
+
+    def test_queue_timeout_publishes_dlq_only_once_for_same_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = FakeApiClient()
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                terminal_message_store=TerminalMessageStore(temp_dir),
+                sleep_fn=lambda _: None,
+            )
+            consumer._compute_queue_latency_millis = lambda _: 999_999  # type: ignore[method-assign]
+            message = self._build_message()
+            body = json.dumps(message.model_dump(mode="json")).encode("utf-8")
+            channel = FakeChannel()
+
+            with patch.object(settings, "analysis_queue_timeout_millis", 1):
+                consumer._on_message(channel, FakeMethod(delivery_tag=1), None, body)
+                consumer._on_message(channel, FakeMethod(delivery_tag=2), None, body)
+
+            self.assertEqual(channel.acked_delivery_tags, [1, 2])
+            self.assertEqual(channel.nacked_delivery_tags, [])
+            self.assertEqual(len(channel.published_messages), 1)
+            self.assertEqual(len(api_client.fail_analysis_calls), 1)
+            self.assertEqual(channel.published_messages[0]["routing_key"], settings.analysis_rabbitmq_dlq)
+
+    def test_queue_timeout_skips_dlq_when_task_is_already_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = FakeApiClient(analysis_task_status="FAILED")
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                terminal_message_store=TerminalMessageStore(temp_dir),
+                sleep_fn=lambda _: None,
+            )
+            consumer._compute_queue_latency_millis = lambda _: 999_999  # type: ignore[method-assign]
+            message = self._build_message()
+            body = json.dumps(message.model_dump(mode="json")).encode("utf-8")
+            channel = FakeChannel()
+
+            with patch.object(settings, "analysis_queue_timeout_millis", 1):
+                consumer._on_message(channel, FakeMethod(delivery_tag=7), None, body)
+
+            self.assertEqual(channel.acked_delivery_tags, [7])
+            self.assertEqual(channel.nacked_delivery_tags, [])
+            self.assertEqual(channel.published_messages, [])
+            self.assertEqual(api_client.fail_analysis_calls, [])
 
 
 if __name__ == "__main__":
