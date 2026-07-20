@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -22,7 +23,7 @@ class JobPostingIngestTaskMessage(BaseModel):
     imageObjectKey: str | None = None
     retryCount: int = 0
     maxRetryCount: int = 0
-    submittedAt: str
+    submittedAt: datetime
 
 
 class JobPostingWorkerContextRequest(BaseModel):
@@ -37,7 +38,7 @@ class JobPostingWorkerContextResponse(BaseModel):
 class JobPostingWorkerRunningRequest(BaseModel):
     workerId: str
     retryCount: int
-    submittedAt: str | None = None
+    submittedAt: datetime | None = None
 
 
 class JobPostingExtractResponse(BaseModel):
@@ -147,7 +148,7 @@ class AnalysisTaskMessage(BaseModel):
     mockApplyId: int
     retryCount: int = 0
     maxRetryCount: int = 0
-    submittedAt: str
+    submittedAt: datetime
 
 
 class AnalysisWorkerContextRequest(BaseModel):
@@ -180,7 +181,7 @@ class AnalysisWorkerContextResponse(BaseModel):
 class AnalysisWorkerRunningRequest(BaseModel):
     workerId: str
     retryCount: int
-    submittedAt: str | None = None
+    submittedAt: datetime | None = None
 
 
 class AnalysisQuestionAnalysisResponse(BaseModel):

@@ -893,15 +893,15 @@ class RabbitMqConsumer:
                 extra=self._log_context(message, retry_count),
             )
 
-    def _compute_queue_latency_millis(self, submitted_at: str) -> int:
-        submitted_at_datetime = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+    def _compute_queue_latency_millis(self, submitted_at: datetime) -> int:
+        submitted_at_datetime = submitted_at
         if submitted_at_datetime.tzinfo is None:
             submitted_at_datetime = submitted_at_datetime.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         latency = (now - submitted_at_datetime.astimezone(timezone.utc)).total_seconds() * 1000
         return max(int(latency), 0)
 
-    def _safe_compute_queue_latency(self, submitted_at: str) -> int | None:
+    def _safe_compute_queue_latency(self, submitted_at: datetime) -> int | None:
         try:
             return self._compute_queue_latency_millis(submitted_at)
         except Exception:

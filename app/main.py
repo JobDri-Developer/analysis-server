@@ -1,29 +1,13 @@
 from __future__ import annotations
 
-import logging
-
 from fastapi import FastAPI
 
 from app.config import settings
 from app.consumer import RabbitMqConsumer
+from app.logging_utils import configure_worker_logging
 
 
-class WorkerContextFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        for field_name in ("taskId", "workerId", "retryCount"):
-            if not hasattr(record, field_name):
-                setattr(record, field_name, "-")
-        return True
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s %(levelname)s [%(name)s] "
-        "[taskId=%(taskId)s workerId=%(workerId)s retryCount=%(retryCount)s] %(message)s"
-    ),
-)
-logging.getLogger().addFilter(WorkerContextFilter())
+configure_worker_logging()
 
 app = FastAPI(title=settings.app_name)
 consumer = RabbitMqConsumer()

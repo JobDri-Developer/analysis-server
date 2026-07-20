@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+import logging
 from unittest.mock import patch
 
 os.environ.setdefault("APP_WORKER_INTERNAL_API_KEY", "test-internal-key")
@@ -98,6 +99,7 @@ if "openai" not in sys.modules:
 from app.api_client import SpringWorkerApiClient
 from app.config import settings
 from app.consumer import RabbitMqConsumer
+from app.logging_utils import WorkerContextFilter
 from app.recovery import PendingDeliveryStore
 from app.schemas import (
     AnalysisLlmResponse,
@@ -262,6 +264,39 @@ class RecoveryFlowTests(unittest.TestCase):
         )
 
         client.store_analysis_result("task-1", request)
+
+    def test_analysis_task_message_accepts_epoch_submitted_at(self) -> None:
+        message = AnalysisTaskMessage.model_validate(
+            {
+                "messageId": "m-1",
+                "taskType": "ANALYSIS",
+                "taskId": "task-1",
+                "userId": 10,
+                "mockApplyId": 20,
+                "retryCount": 0,
+                "maxRetryCount": 3,
+                "submittedAt": 1784534106.0190554,
+            }
+        )
+
+        self.assertIsNotNone(message.submittedAt.tzinfo)
+        self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-19T03:15:06.019055Z")
+
+    def test_worker_context_filter_sets_defaults_for_missing_fields(self) -> None:
+        log_record = logging.LogRecord(
+            name="pika.adapters.blocking_connection",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="connection open",
+            args=(),
+            exc_info=None,
+        )
+
+        self.assertTrue(WorkerContextFilter().filter(log_record))
+        self.assertEqual(log_record.taskId, "-")
+        self.assertEqual(log_record.workerId, "-")
+        self.assertEqual(log_record.retryCount, "-")
 
 
 if __name__ == "__main__":
