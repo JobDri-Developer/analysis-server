@@ -29,4 +29,18 @@ services:
       WORKER_MAX_RETRY_COUNT: ${WORKER_MAX_RETRY_COUNT:-3}
       APP_WORKER_ANALYSIS_MAX_RETRY_COUNT: ${APP_WORKER_ANALYSIS_MAX_RETRY_COUNT:-3}
       APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS: ${APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS:-300000}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+        reservations:
+          cpus: "0.50"
+          memory: 512M
     restart: unless-stopped
