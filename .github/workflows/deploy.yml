@@ -13,6 +13,7 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/jobdri-developer/analysis-worker
+  REMOTE_COMPOSE_FILE: docker-compose.worker.prod.yml
 
 jobs:
   build-and-push:
@@ -50,9 +51,24 @@ jobs:
       HAS_DEPLOY_SECRETS: ${{ secrets.DEPLOY_HOST != '' && secrets.DEPLOY_USER != '' && secrets.DEPLOY_SSH_KEY != '' && secrets.DEPLOY_PATH != '' && secrets.GHCR_USERNAME != '' && secrets.GHCR_TOKEN != '' }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Skip deploy when server secrets are missing
         if: env.HAS_DEPLOY_SECRETS != 'true'
         run: echo "Deployment skipped because required server secrets are not configured."
+
+      - name: Upload worker compose file
+        if: env.HAS_DEPLOY_SECRETS == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: deploy/${{ env.REMOTE_COMPOSE_FILE }}
+          target: ${{ secrets.DEPLOY_PATH }}
+          strip_components: 1
 
       - name: Deploy worker with Docker Compose
         if: env.HAS_DEPLOY_SECRETS == 'true'
@@ -74,6 +90,7 @@ jobs:
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             export WORKER_IMAGE_NAME="$IMAGE_NAME"
             export WORKER_IMAGE_TAG="$IMAGE_TAG"
-            docker compose -f docker-compose.prod.yml pull worker
-            docker compose -f docker-compose.prod.yml up -d worker
+            docker compose -f "${{ env.REMOTE_COMPOSE_FILE }}" config --services | grep -Fx worker
+            docker compose -f "${{ env.REMOTE_COMPOSE_FILE }}" pull worker
+            docker compose -f "${{ env.REMOTE_COMPOSE_FILE }}" up -d worker
             docker image prune -f
