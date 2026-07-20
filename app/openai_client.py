@@ -367,7 +367,7 @@ class AnalysisOpenAiWorker:
         return f"""
 당신은 자기소개서 분석 평가자입니다.
 지원 직무 적합도, 답변의 임팩트, 전체 완성도를 0부터 100 사이 정수로 평가하고,
-전체 피드백과 각 문항별 분석을 JSON으로만 반환하세요.
+전체 피드백, 핵심 강점/약점, 누락 키워드, 각 문항별 분석을 JSON으로만 반환하세요.
 
 반드시 아래 스키마만 반환하세요.
 {{
@@ -375,16 +375,53 @@ class AnalysisOpenAiWorker:
   "impact": 0,
   "completeness": 0,
   "feedback": "string",
+  "keyStrengths": [
+    {{
+      "title": "짧은 핵심 강점 문장",
+      "quote": "자소서 답변에 실제 포함된 정확한 부분 문자열"
+    }}
+  ],
+  "keyWeaknesses": [
+    {{
+      "title": "짧은 핵심 약점 문장",
+      "quote": "JD 또는 자소서 답변에 실제 포함된 정확한 부분 문자열"
+    }}
+  ],
+  "missingKeywords": [
+    {{
+      "keyword": "JD에는 있지만 답변에서 충분히 드러나지 않은 짧은 역량/요건",
+      "source": "qualification|preference|mainTask"
+    }}
+  ],
   "questionAnalyses": [
     {{
       "questionId": 1,
       "sentence": "string",
-      "status": "GOOD|NEEDS_IMPROVEMENT|RISK",
+      "status": "proven|mentioned|missing|fabricated",
       "reason": "string",
       "improvement": "string"
     }}
   ]
 }}
+
+[판정 규칙]
+- jobFit, impact, completeness는 0부터 100 사이 정수만 사용한다.
+- questionAnalyses의 questionId는 입력된 questionId 중 하나만 사용한다.
+- questionAnalyses의 sentence는 반드시 해당 questionId의 answer에 실제 포함된 정확한 substring이어야 한다.
+- 원문 매칭이 불확실하면 questionAnalyses에 포함하지 않는다.
+- status는 proven, mentioned, missing, fabricated 중 하나만 사용한다.
+- proven: 답변에 구체적인 근거, 행동, 결과가 충분히 드러남
+- mentioned: 관련 키워드나 경험은 있으나 구체적인 근거, 에피소드, 결과가 부족함
+- missing: 관련 언급이 전혀 없음. 단, 원문 sentence가 없으므로 questionAnalyses에는 억지로 넣지 않는다.
+- fabricated: 답변에 없는 내용을 있는 것처럼 주장하거나 과장 위험이 큼
+- keyStrengths와 keyWeaknesses는 각각 최대 3개이며, 없으면 []로 출력한다.
+- keyStrengths의 quote는 자소서 answer에 실제 포함된 substring만 사용한다.
+- missingKeywords는 최대 3개이며, 없으면 []로 출력한다.
+- missingKeywords의 source는 qualification, preference, mainTask 중 하나만 사용한다.
+- keyWeaknesses의 첫 항목들은 가능하면 missingKeywords와 같은 누락 요건을 다룬다.
+- missingKeywords 기반 keyWeaknesses의 quote는 JD의 주요 업무, 자격 요건, 우대 사항에 실제 포함된 표현을 사용한다.
+- missingKeywords가 없으면 keyWeaknesses는 questionAnalyses의 보완 대상 문장 quote를 우선 사용한다.
+- 모든 title은 한 문장으로 짧게 작성한다.
 
 [채용 공고]
 - 회사명: {context.companyName}
