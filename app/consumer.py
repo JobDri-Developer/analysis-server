@@ -862,11 +862,16 @@ class RabbitMqConsumer:
         if published:
             self._ack_message(channel, delivery_tag, reason=f"{outcome_reason}-dlq-published", message=message)
             return
-        self._nack_message(
+        logger.error(
+            "DLQ publish가 실패했지만 task는 이미 terminal 상태로 반영되어 재큐잉하지 않습니다. failureReason=%s outcome=%s",
+            failure_reason,
+            outcome_reason,
+            extra=self._log_context(message, retry_count),
+        )
+        self._ack_message(
             channel,
             delivery_tag,
-            requeue=True,
-            reason=f"{outcome_reason}-dlq-publish-failed",
+            reason=f"{outcome_reason}-dlq-publish-failed-no-requeue",
             message=message,
         )
 
