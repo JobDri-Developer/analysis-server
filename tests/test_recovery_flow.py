@@ -110,6 +110,7 @@ from app.schemas import (
     AnalysisWorkerCompleteRequest,
     AnalysisWorkerFailureRequest,
     AnalysisWorkerResultStoreRequest,
+    NonRetryableWorkerError,
     PendingDeliveryEntry,
     RetryableWorkerError,
 )
@@ -446,6 +447,70 @@ class RecoveryFlowTests(unittest.TestCase):
                 consumer._on_message(channel, FakeMethod(delivery_tag=7), None, body)
 
             self.assertEqual(channel.acked_delivery_tags, [7])
+            self.assertEqual(channel.nacked_delivery_tags, [])
+            self.assertEqual(channel.published_messages, [])
+            self.assertEqual(api_client.fail_analysis_calls, [])
+
+    def test_non_retryable_failure_does_not_requeue_when_dlq_publish_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = FakeApiClient()
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                terminal_message_store=TerminalMessageStore(temp_dir),
+                sleep_fn=lambda _: None,
+            )
+            message = self._build_message()
+            channel = FakeChannel()
+
+            def publish_fail(*args, **kwargs) -> bool:
+                return False
+
+            consumer._publish_dlq = publish_fail  # type: ignore[method-assign]
+            consumer._handle_non_retryable(
+                channel,
+                delivery_tag=11,
+                message=message,
+                body=json.dumps(message.model_dump(mode="json")).encode("utf-8"),
+                properties=None,
+                error=NonRetryableWorkerError(
+                    "이미 처리되었거나 중복된 요청입니다.",
+                    failure_reason="VALIDATION_ERROR",
+                ),
+            )
+
+            self.assertEqual(channel.acked_delivery_tags, [11])
+            self.assertEqual(channel.nacked_delivery_tags, [])
+            self.assertEqual(api_client.fail_analysis_calls[0][0], message.taskId)
+
+    def test_terminal_task_is_acked_even_when_dlq_publish_failed_previously(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = FakeApiClient(analysis_task_status="FAILED")
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                terminal_message_store=TerminalMessageStore(temp_dir),
+                sleep_fn=lambda _: None,
+            )
+            channel = FakeChannel()
+            message = self._build_message()
+            body = json.dumps(message.model_dump(mode="json")).encode("utf-8")
+
+            consumer._handle_non_retryable(
+                channel,
+                delivery_tag=12,
+                message=message,
+                body=body,
+                properties=None,
+                error=NonRetryableWorkerError(
+                    "이미 처리되었거나 중복된 요청입니다.",
+                    failure_reason="VALIDATION_ERROR",
+                ),
+            )
+
+            self.assertEqual(channel.acked_delivery_tags, [12])
             self.assertEqual(channel.nacked_delivery_tags, [])
             self.assertEqual(channel.published_messages, [])
             self.assertEqual(api_client.fail_analysis_calls, [])
