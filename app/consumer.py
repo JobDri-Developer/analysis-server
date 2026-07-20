@@ -83,9 +83,20 @@ class RabbitMqConsumer:
             try:
                 self._channel.stop_consuming()
             except Exception:
-                logger.exception("RabbitMQ consuming stop 중 오류가 발생했습니다.")
+                logger.warning(
+                    "RabbitMQ consuming stop 중 오류가 발생했지만 종료를 계속합니다.",
+                    extra={"workerId": self._worker_id},
+                    exc_info=True,
+                )
         if self._connection and self._connection.is_open:
-            self._connection.close()
+            try:
+                self._connection.close()
+            except Exception:
+                logger.warning(
+                    "RabbitMQ connection close 중 오류가 발생했지만 종료를 계속합니다.",
+                    extra={"workerId": self._worker_id},
+                    exc_info=True,
+                )
 
     def _run(self) -> None:
         credentials = pika.PlainCredentials(settings.rabbitmq_username, settings.rabbitmq_password)
@@ -137,7 +148,13 @@ class RabbitMqConsumer:
             payload = json.loads(body.decode("utf-8"))
             message = self._deserialize_message(payload)
         except Exception:
-            logger.exception("메시지 역직렬화에 실패했습니다.")
+            raw_body = body.decode("utf-8", errors="replace")
+            logger.exception(
+                "메시지 역직렬화에 실패했습니다. deliveryTag=%s payload=%s",
+                getattr(method, "delivery_tag", "-"),
+                raw_body[:2000],
+                extra={"workerId": self._worker_id},
+            )
             channel.basic_ack(delivery_tag=method.delivery_tag)
             return
 

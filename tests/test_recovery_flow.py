@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sys
 import tempfile
 import types
 import unittest
-import logging
 from unittest.mock import patch
 
 os.environ.setdefault("APP_WORKER_INTERNAL_API_KEY", "test-internal-key")
@@ -134,6 +135,19 @@ class FakeResponse:
 
     def json(self) -> dict:
         return self._payload
+
+
+class FakeChannel:
+    def __init__(self) -> None:
+        self.acked_delivery_tags: list[int] = []
+
+    def basic_ack(self, delivery_tag: int) -> None:
+        self.acked_delivery_tags.append(delivery_tag)
+
+
+class FakeMethod:
+    def __init__(self, delivery_tag: int = 1) -> None:
+        self.delivery_tag = delivery_tag
 
 
 class RecoveryFlowTests(unittest.TestCase):
@@ -282,6 +296,40 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIsNotNone(message.submittedAt.tzinfo)
         self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-19T03:15:06.019055Z")
 
+    def test_analysis_task_message_accepts_iso_submitted_at(self) -> None:
+        message = AnalysisTaskMessage.model_validate(
+            {
+                "messageId": "m-1",
+                "taskType": "ANALYSIS",
+                "taskId": "task-1",
+                "userId": 10,
+                "mockApplyId": 20,
+                "retryCount": 0,
+                "maxRetryCount": 3,
+                "submittedAt": "2026-07-19T00:00:00Z",
+            }
+        )
+
+        self.assertIsNotNone(message.submittedAt.tzinfo)
+        self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-19T00:00:00Z")
+
+    def test_analysis_task_message_accepts_int_epoch_submitted_at(self) -> None:
+        message = AnalysisTaskMessage.model_validate(
+            {
+                "messageId": "m-1",
+                "taskType": "ANALYSIS",
+                "taskId": "task-1",
+                "userId": 10,
+                "mockApplyId": 20,
+                "retryCount": 0,
+                "maxRetryCount": 3,
+                "submittedAt": 1784534106,
+            }
+        )
+
+        self.assertIsNotNone(message.submittedAt.tzinfo)
+        self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-19T03:15:06Z")
+
     def test_worker_context_filter_sets_defaults_for_missing_fields(self) -> None:
         log_record = logging.LogRecord(
             name="pika.adapters.blocking_connection",
@@ -297,6 +345,32 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertEqual(log_record.taskId, "-")
         self.assertEqual(log_record.workerId, "-")
         self.assertEqual(log_record.retryCount, "-")
+
+    def test_on_message_acks_invalid_payload_after_deserialization_failure(self) -> None:
+        consumer = RabbitMqConsumer(
+            api_client=FakeApiClient(),
+            openai_worker=object(),  # type: ignore[arg-type]
+            analysis_openai_worker=object(),  # type: ignore[arg-type]
+            sleep_fn=lambda _: None,
+        )
+        channel = FakeChannel()
+        method = FakeMethod(delivery_tag=99)
+        invalid_message_body = json.dumps(
+            {
+                "messageId": "m-1",
+                "taskType": "ANALYSIS",
+                "taskId": "task-1",
+                "userId": 10,
+                "mockApplyId": 20,
+                "retryCount": 0,
+                "maxRetryCount": 3,
+                "submittedAt": {"invalid": True},
+            }
+        ).encode("utf-8")
+
+        consumer._on_message(channel, method, None, invalid_message_body)
+
+        self.assertEqual(channel.acked_delivery_tags, [99])
 
 
 if __name__ == "__main__":
