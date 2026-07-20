@@ -2,12 +2,12 @@
 
 ## 서버 배치 방식
 
-- 백엔드 서버의 `docker-compose.prod.yml` 하나로 `api`, `worker`, `rabbitmq` 를 함께 관리한다.
+- 워커는 레포의 `deploy/docker-compose.worker.prod.yml` 을 서버에 업로드한 뒤 단독으로 관리한다.
 - 워커는 외부 포트를 열지 않고 Spring API와 RabbitMQ에만 연결한다.
 
 ## 서버에 둘 파일
 
-- `docker-compose.prod.yml`
+- `docker-compose.worker.prod.yml`
 - `.env`
 
 ## 서버 `.env` 에 필요한 값
@@ -41,8 +41,8 @@
 docker login ghcr.io
 export WORKER_IMAGE_NAME=ghcr.io/jobdri-developer/analysis-worker
 export WORKER_IMAGE_TAG=latest
-docker compose -f docker-compose.prod.yml pull worker
-docker compose -f docker-compose.prod.yml up -d worker
+docker compose -f docker-compose.worker.prod.yml pull worker
+docker compose -f docker-compose.worker.prod.yml up -d worker
 ```
 
 ## GitHub Actions secrets
@@ -55,4 +55,4 @@ docker compose -f docker-compose.prod.yml up -d worker
 - `GHCR_USERNAME`
 - `GHCR_TOKEN`
 
-`DEPLOY_PATH` 는 백엔드 서버에서 `docker-compose.prod.yml` 과 `.env` 가 있는 디렉터리여야 한다.
+`DEPLOY_PATH` 는 백엔드 서버에서 `.env` 를 관리하는 디렉터리여야 한다. GitHub Actions가 같은 경로로 `docker-compose.worker.prod.yml` 을 업로드한다.
