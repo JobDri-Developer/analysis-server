@@ -5,24 +5,10 @@ import signal
 import threading
 
 from app.consumer import RabbitMqConsumer
+from app.logging_utils import configure_worker_logging
 
 
-class WorkerContextFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        for field_name in ("taskId", "workerId", "retryCount"):
-            if not hasattr(record, field_name):
-                setattr(record, field_name, "-")
-        return True
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s %(levelname)s [%(name)s] "
-        "[taskId=%(taskId)s workerId=%(workerId)s retryCount=%(retryCount)s] %(message)s"
-    ),
-)
-logging.getLogger().addFilter(WorkerContextFilter())
+configure_worker_logging()
 
 logger = logging.getLogger(__name__)
 
