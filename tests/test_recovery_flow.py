@@ -369,6 +369,12 @@ class RecoveryFlowTests(unittest.TestCase):
                         answer="장애 로그를 분석하고 재시도 로직을 개선했습니다.",
                         charLimit=700,
                     ),
+                    AnalysisQuestionContextResponse(
+                        questionId=12,
+                        question="추가로 강조하고 싶은 내용을 작성해주세요.",
+                        answer="",
+                        charLimit=700,
+                    ),
                 ],
             )
         )
@@ -376,7 +382,12 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIn("모든 입력 문항은 questionAnalyses에 최소 1개 이상 포함한다", prompt)
         self.assertIn("모든 questionId를 빠짐없이 커버해야 한다", prompt)
         self.assertIn("문항당 최대 2개까지 포함한다", prompt)
+        self.assertIn('"status": "proven|mentioned|fabricated"', prompt)
+        self.assertIn("status는 proven, mentioned, fabricated 중 하나만 사용한다", prompt)
+        self.assertNotIn('"status": "proven|mentioned|missing|fabricated"', prompt)
+        self.assertNotIn("status는 proven, mentioned, missing, fabricated 중 하나만 사용한다", prompt)
         self.assertIn("questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다", prompt)
+        self.assertIn("questionId=12\n  question=추가로 강조하고 싶은 내용을 작성해주세요.\n  answer=\n  charLimit=700", prompt)
 
     def test_store_analysis_result_treats_conflict_as_success(self) -> None:
         client = SpringWorkerApiClient()

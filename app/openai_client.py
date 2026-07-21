@@ -538,7 +538,7 @@ class AnalysisOpenAiWorker:
     {{
       "questionId": 1,
       "sentence": "string",
-      "status": "proven|mentioned|missing|fabricated",
+      "status": "proven|mentioned|fabricated",
       "reason": "string",
       "improvement": "string"
     }}
@@ -554,11 +554,11 @@ class AnalysisOpenAiWorker:
 - 각 문항에서 가장 평가 가치가 큰 실제 문장 1개를 우선 선택하고, 필요하면 문항당 최대 2개까지 포함한다.
 - 강한 긍정 근거가 부족한 문항도 생략하지 말고, 해당 answer의 실제 문장 1개를 골라 mentioned 또는 fabricated로 평가한다.
 - 원문 매칭이 불확실하면 문장을 요약하거나 재작성하지 말고, 해당 answer에서 더 짧고 정확히 일치하는 substring을 다시 선택한다.
-- status는 proven, mentioned, missing, fabricated 중 하나만 사용한다.
+- status는 proven, mentioned, fabricated 중 하나만 사용한다.
 - proven: 답변에 구체적인 근거, 행동, 결과가 충분히 드러남
 - mentioned: 관련 키워드나 경험은 있으나 구체적인 근거, 에피소드, 결과가 부족함
-- missing: 관련 언급이 전혀 없음. 단, 원문 sentence가 없으므로 questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다.
 - fabricated: 답변에 없는 내용을 있는 것처럼 주장하거나 과장 위험이 큼
+- 관련 언급이 전혀 없는 missing 사례는 원문 sentence가 없으므로 questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다.
 - keyStrengths와 keyWeaknesses는 각각 최대 3개이며, 없으면 []로 출력한다.
 - keyStrengths의 quote는 자소서 answer에 실제 포함된 substring만 사용한다.
 - missingKeywords는 최대 3개이며, 없으면 []로 출력한다.
