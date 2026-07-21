@@ -9,6 +9,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Callable
+from uuid import uuid4
 
 import pika
 
@@ -168,6 +169,7 @@ class RabbitMqConsumer:
                     "메시지 역직렬화에 실패했습니다.",
                     deliveryTag=getattr(method, "delivery_tag", None),
                     failureReason="INVALID_PAYLOAD",
+                    errorCode="INVALID_PAYLOAD",
                     bodySize=len(body),
                 )
             self._ack_message(channel, method.delivery_tag, reason="invalid-payload")
@@ -182,6 +184,7 @@ class RabbitMqConsumer:
                     deliveryTag=getattr(method, "delivery_tag", None),
                     requeue=True,
                     failureReason="TASK_ALREADY_INFLIGHT",
+                    errorCode="TASK_ALREADY_INFLIGHT",
                 )
                 self._nack_message(
                     channel,
@@ -220,6 +223,7 @@ class RabbitMqConsumer:
                     "비재시도 에러로 작업을 실패 처리합니다.",
                     deliveryTag=getattr(method, "delivery_tag", None),
                     failureReason=exc.failure_reason,
+                    errorCode=exc.failure_reason,
                     error=str(exc),
                 )
                 self._handle_non_retryable(channel, method.delivery_tag, message, body, properties, exc)
@@ -231,6 +235,7 @@ class RabbitMqConsumer:
                     "재시도 가능한 에러가 발생했습니다.",
                     deliveryTag=getattr(method, "delivery_tag", None),
                     failureReason=exc.failure_reason,
+                    errorCode=exc.failure_reason,
                     error=str(exc),
                 )
                 self._retry_or_fail(channel, method.delivery_tag, properties, message, body, exc)
@@ -242,6 +247,7 @@ class RabbitMqConsumer:
                     "예상치 못한 worker 에러가 발생했습니다.",
                     deliveryTag=getattr(method, "delivery_tag", None),
                     failureReason="INTERNAL_ERROR",
+                    errorCode="INTERNAL_ERROR",
                 )
                 retryable_exc = RetryableWorkerError(str(exc), failure_reason="INTERNAL_ERROR")
                 self._retry_or_fail(channel, method.delivery_tag, properties, message, body, retryable_exc)
@@ -538,6 +544,9 @@ class RabbitMqConsumer:
         retry_count: int,
         replayed: bool,
     ) -> bool:
+        if not entry.requestId:
+            entry.requestId = self._generate_request_id()
+            self._recovery_store.upsert(entry)
         with bind_log_context(**self._entry_log_context(entry)):
             log_info(
                 logger,
@@ -621,9 +630,10 @@ class RabbitMqConsumer:
                             log_warning(
                                 logger,
                                 "worker.recovery.replay_pending",
-                                "recovery spool 재전송이 아직 완료되지 않았습니다.",
+                "recovery spool 재전송이 아직 완료되지 않았습니다.",
                                 nextAttemptAt=entry.nextAttemptAt,
                                 lastError=entry.lastError,
+                                errorCode="RECOVERY_REPLAY_PENDING",
                             )
                 except NonRetryableWorkerError:
                     with bind_log_context(**self._entry_log_context(entry)):
@@ -632,6 +642,7 @@ class RabbitMqConsumer:
                             "worker.recovery.replay_failed",
                             "recovery spool 항목 재전송이 비재시도 오류로 종료되었습니다.",
                             deliveryKind=entry.deliveryKind,
+                            errorCode="RECOVERY_REPLAY_FAILED",
                         )
                 finally:
                     self._release_inflight(entry.taskId)
@@ -681,6 +692,7 @@ class RabbitMqConsumer:
                     maxAttempts=max_attempts,
                     latencyMs=self._elapsed_millis(started_at),
                     nextAttemptAt=next_attempt_at,
+                    errorCode=exc.failure_reason,
                     error=str(exc),
                     replayed=replayed,
                 )
@@ -697,6 +709,7 @@ class RabbitMqConsumer:
                     operationName=operation_name,
                     attempt=attempt,
                     latencyMs=self._elapsed_millis(started_at),
+                    errorCode=exc.failure_reason,
                     error=str(exc),
                     replayed=replayed,
                 )
@@ -753,6 +766,7 @@ class RabbitMqConsumer:
                 "worker.task.retry",
                 "작업을 retry 경로로 전환합니다.",
                 failureReason=error.failure_reason,
+                errorCode=error.failure_reason,
                 maxRetryCount=max_retry_count,
             )
 
@@ -923,6 +937,7 @@ class RabbitMqConsumer:
                     "worker.task.failed",
                     "이미 terminal 처리된 메시지여서 추가 실패 처리와 DLQ 적재를 건너뜁니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                     outcome=outcome_reason,
                 )
             self._ack_message(channel, delivery_tag, reason="already-terminal-message", message=message)
@@ -935,6 +950,7 @@ class RabbitMqConsumer:
                     "worker.task.failed",
                     "이미 terminal 상태인 task여서 추가 실패 처리와 DLQ 적재를 건너뜁니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                     outcome=outcome_reason,
                 )
             self._ack_message(channel, delivery_tag, reason="already-terminal-task", message=message)
@@ -968,6 +984,7 @@ class RabbitMqConsumer:
                 "worker.task.failed",
                 "DLQ publish가 실패했지만 task는 이미 terminal 상태로 반영되어 재큐잉하지 않습니다.",
                 failureReason=failure_reason,
+                errorCode=failure_reason,
                 outcome=outcome_reason,
             )
             self._ack_message(
@@ -992,6 +1009,7 @@ class RabbitMqConsumer:
                 "worker.dlq.skipped",
                 "이미 DLQ 적재된 메시지여서 중복 publish를 건너뜁니다.",
                 failureReason=failure_reason,
+                errorCode=failure_reason,
             )
             return True
 
@@ -1000,6 +1018,7 @@ class RabbitMqConsumer:
             "worker.dlq.publish.started",
             "DLQ publish를 시도합니다.",
             failureReason=failure_reason,
+            errorCode=failure_reason,
         )
         published = self._publish_dlq(channel, body, properties, message)
         log_info(
@@ -1008,6 +1027,7 @@ class RabbitMqConsumer:
             "DLQ publish 결과입니다.",
             published=published,
             failureReason=failure_reason,
+            errorCode=failure_reason,
         )
         if not published:
             return False
@@ -1042,10 +1062,11 @@ class RabbitMqConsumer:
         log_info(
             logger,
             "worker.task.terminal_confirmed",
-            "task terminal 상태를 확인했습니다.",
-            status=task_status.status,
-            failureReason=task_status.failureReason,
-        )
+                "task terminal 상태를 확인했습니다.",
+                status=task_status.status,
+                failureReason=task_status.failureReason,
+                errorCode=task_status.failureReason,
+            )
         return True
 
     def _get_task_status(
@@ -1071,6 +1092,7 @@ class RabbitMqConsumer:
                     "worker.task.retry",
                     "job posting 작업을 retry 상태로 반영합니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                 )
                 self._api_client.retry_job_posting_task(
                     message.taskId,
@@ -1088,6 +1110,7 @@ class RabbitMqConsumer:
                     "worker.task.retry",
                     "Spring API에 job posting retry 상태를 반영하지 못했습니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                 )
 
     def _safe_fail_job_posting_task(
@@ -1105,6 +1128,7 @@ class RabbitMqConsumer:
                     "worker.task.failed",
                     "job posting 작업을 failed 상태로 반영합니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                 )
                 self._api_client.fail_job_posting_task(
                     message.taskId,
@@ -1122,6 +1146,7 @@ class RabbitMqConsumer:
                     "worker.task.failed",
                     "Spring API에 job posting 실패 상태를 반영하지 못했습니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                 )
 
     def _safe_retry_analysis_task(
@@ -1140,6 +1165,7 @@ class RabbitMqConsumer:
                     "worker.task.retry",
                     "analysis 작업을 retry 상태로 반영합니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                     openaiRequestId=openai_request_id,
                 )
                 self._api_client.retry_analysis_task(
@@ -1158,6 +1184,7 @@ class RabbitMqConsumer:
                     "worker.task.retry",
                     "Spring API에 analysis retry 상태를 반영하지 못했습니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                     openaiRequestId=openai_request_id,
                 )
 
@@ -1177,6 +1204,7 @@ class RabbitMqConsumer:
                     "worker.task.failed",
                     "analysis 작업을 failed 상태로 반영합니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                     openaiRequestId=openai_request_id,
                 )
                 self._api_client.fail_analysis_task(
@@ -1195,6 +1223,7 @@ class RabbitMqConsumer:
                     "worker.task.failed",
                     "Spring API에 analysis 실패 상태를 반영하지 못했습니다.",
                     failureReason=failure_reason,
+                    errorCode=failure_reason,
                     openaiRequestId=openai_request_id,
                 )
 
@@ -1294,6 +1323,7 @@ class RabbitMqConsumer:
                 deliveryTag=delivery_tag,
                 requeue=requeue,
                 nackReason=reason,
+                errorCode=reason,
             )
         channel.basic_nack(delivery_tag=delivery_tag, requeue=requeue)
 
@@ -1353,7 +1383,11 @@ class RabbitMqConsumer:
     ) -> dict[str, str | int | None]:
         headers = getattr(properties, "headers", None) or {}
         return {
-            "requestId": self._coerce_string(headers.get("x-request-id")) or self._coerce_string((payload or {}).get("requestId")),
+            "requestId": (
+                self._coerce_string(headers.get("x-request-id"))
+                or self._coerce_string((payload or {}).get("requestId"))
+                or self._generate_request_id()
+            ),
             "taskId": self._coerce_string(headers.get("x-task-id")) or self._coerce_string((payload or {}).get("taskId")),
             "messageId": (
                 self._coerce_string(headers.get("x-message-id"))
@@ -1412,6 +1446,9 @@ class RabbitMqConsumer:
             except (TypeError, ValueError):
                 continue
         return None
+
+    def _generate_request_id(self) -> str:
+        return f"worker-{uuid4()}"
 
     def _elapsed_millis(self, started_at: float) -> int:
         return max(int((monotonic() - started_at) * 1000), 0)

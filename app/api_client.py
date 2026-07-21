@@ -171,6 +171,7 @@ class SpringWorkerApiClient:
                 "Spring API 요청이 전송되지 못했습니다.",
                 httpMethod="POST",
                 path=path,
+                errorCode="SPRING_API_REQUEST_FAILED",
                 error=str(exc),
             )
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
@@ -201,6 +202,7 @@ class SpringWorkerApiClient:
                 "Spring API 요청이 전송되지 못했습니다.",
                 httpMethod="GET",
                 path=path,
+                errorCode="SPRING_API_REQUEST_FAILED",
                 error=str(exc),
             )
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
@@ -240,6 +242,7 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                errorCode="SPRING_API_SERVER_ERROR",
             )
             raise RetryableWorkerError(f"Spring API 서버 오류: {response.status_code}")
 
@@ -254,6 +257,7 @@ class SpringWorkerApiClient:
                     httpMethod=method,
                     path=path,
                     statusCode=response.status_code,
+                    errorCode="SPRING_API_CLIENT_ERROR",
                 )
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
             log_warning(
@@ -263,6 +267,7 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                errorCode="SPRING_API_RESPONSE_PARSE_FAILED",
             )
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
 
@@ -277,6 +282,7 @@ class SpringWorkerApiClient:
                     httpMethod=method,
                     path=path,
                     statusCode=response.status_code,
+                    errorCode="SPRING_API_CLIENT_ERROR",
                 )
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
             log_warning(
@@ -286,6 +292,7 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                errorCode="SPRING_API_RESPONSE_SCHEMA_INVALID",
             )
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
 
@@ -298,6 +305,7 @@ class SpringWorkerApiClient:
                 path=path,
                 statusCode=response.status_code,
                 responseCode=envelope.code,
+                errorCode=envelope.code,
             )
             raise NonRetryableWorkerError(str(envelope.error or envelope.message))
 

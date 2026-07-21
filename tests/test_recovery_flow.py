@@ -421,6 +421,29 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertEqual(message.retryCount, 2)
         self.assertEqual(message.messageId, "msg-header")
 
+    def test_deserialize_message_generates_request_id_when_missing(self) -> None:
+        consumer = RabbitMqConsumer(
+            api_client=FakeApiClient(),
+            openai_worker=object(),  # type: ignore[arg-type]
+            analysis_openai_worker=object(),  # type: ignore[arg-type]
+            sleep_fn=lambda _: None,
+        )
+        payload = {
+            "messageId": "m-1",
+            "taskType": "ANALYSIS",
+            "taskId": "task-1",
+            "userId": 10,
+            "mockApplyId": 20,
+            "retryCount": 0,
+            "maxRetryCount": 3,
+            "submittedAt": "2026-07-19T00:00:00Z",
+        }
+
+        message = consumer._deserialize_message(payload, None)
+
+        self.assertIsNotNone(message.requestId)
+        self.assertTrue(message.requestId.startswith("worker-"))
+
     def test_api_client_forwards_request_id_header(self) -> None:
         client = SpringWorkerApiClient()
         captured_headers: dict[str, str] = {}
