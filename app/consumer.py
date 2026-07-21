@@ -293,8 +293,8 @@ class RabbitMqConsumer:
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
             log_info(
                 logger,
-                "worker.task.running",
-                "job posting 작업을 running 상태로 반영합니다.",
+                "worker.task.started",
+                "job posting 작업을 시작합니다.",
             )
             self._api_client.mark_job_posting_running(
                 message.taskId,
@@ -439,8 +439,8 @@ class RabbitMqConsumer:
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
             log_info(
                 logger,
-                "worker.task.running",
-                "analysis 작업을 running 상태로 반영합니다.",
+                "worker.task.started",
+                "analysis 작업을 시작합니다.",
             )
             self._api_client.mark_analysis_running(
                 message.taskId,
@@ -467,7 +467,32 @@ class RabbitMqConsumer:
                 contextFetchLatencyMs=context_fetch_latency_ms,
             )
 
-            llm_response, openai_request_id = self._analysis_openai_worker.analyze(context)
+            analysis_started_at = monotonic()
+            log_info(
+                logger,
+                "worker.analysis.started",
+                "analysis LLM 처리를 시작합니다.",
+            )
+            try:
+                llm_response, openai_request_id = self._analysis_openai_worker.analyze(context)
+            except (RetryableWorkerError, NonRetryableWorkerError) as exc:
+                log_warning(
+                    logger,
+                    "worker.analysis.failed",
+                    "analysis LLM 처리에 실패했습니다.",
+                    latencyMs=self._elapsed_millis(analysis_started_at),
+                    errorCode=exc.failure_reason,
+                    error=str(exc),
+                    openaiRequestId=exc.openai_request_id,
+                )
+                raise
+            log_info(
+                logger,
+                "worker.analysis.completed",
+                "analysis LLM 처리가 완료되었습니다.",
+                latencyMs=self._elapsed_millis(analysis_started_at),
+                openaiRequestId=openai_request_id,
+            )
             complete_request = self._build_analysis_complete_request(message, llm_response, queue_latency_millis)
             result_store_started_at = monotonic()
             self._store_analysis_result(message, llm_response)
@@ -815,12 +840,21 @@ class RabbitMqConsumer:
         with bind_log_context(**self._message_log_context(message, retry_count=next_retry_count, queue_latency_millis=queue_latency_millis)):
             log_warning(
                 logger,
-                "worker.task.retry",
+                "queue.consume.retry",
                 "작업을 retry 경로로 전환합니다.",
                 failureReason=error.failure_reason,
                 errorCode=error.failure_reason,
                 maxRetryCount=max_retry_count,
             )
+            if isinstance(message, AnalysisTaskMessage):
+                log_warning(
+                    logger,
+                    "worker.analysis.failed",
+                    "analysis 작업이 재시도 경로로 전환되었습니다.",
+                    errorCode=error.failure_reason,
+                    error=str(error),
+                    openaiRequestId=error.openai_request_id,
+                )
 
             if isinstance(message, AnalysisTaskMessage):
                 if next_retry_count > max_retry_count:
@@ -906,6 +940,14 @@ class RabbitMqConsumer:
     ) -> None:
         if isinstance(message, AnalysisTaskMessage):
             queue_latency_millis = error.queue_latency_millis or self._safe_compute_queue_latency(message.submittedAt)
+            log_warning(
+                logger,
+                "worker.analysis.failed",
+                "analysis 작업이 실패했습니다.",
+                errorCode=error.failure_reason,
+                error=str(error),
+                openaiRequestId=error.openai_request_id,
+            )
             self._finalize_failed_message(
                 channel,
                 delivery_tag,
@@ -1387,6 +1429,7 @@ class RabbitMqConsumer:
                 "taskId": None,
                 "messageId": None,
                 "taskType": None,
+                "userId": None,
                 "workerId": self._worker_id,
                 "retryCount": retry_count,
                 "queueLatencyMillis": queue_latency_millis,
@@ -1396,6 +1439,7 @@ class RabbitMqConsumer:
             "taskId": message.taskId,
             "messageId": message.messageId,
             "taskType": message.taskType,
+            "userId": message.userId,
             "workerId": self._worker_id,
             "retryCount": retry_count if retry_count is not None else message.retryCount,
             "queueLatencyMillis": queue_latency_millis,
@@ -1407,6 +1451,7 @@ class RabbitMqConsumer:
             "taskId": entry.taskId,
             "messageId": entry.messageId,
             "taskType": entry.taskType,
+            "userId": None,
             "workerId": self._worker_id,
             "retryCount": entry.retryCount,
             "queueLatencyMillis": None,
@@ -1431,6 +1476,7 @@ class RabbitMqConsumer:
                 or self._coerce_string((payload or {}).get("messageId"))
             ),
             "taskType": self._coerce_string(headers.get("x-task-type")) or self._coerce_string((payload or {}).get("taskType")),
+            "userId": self._coerce_int((payload or {}).get("userId")),
             "workerId": self._worker_id,
             "retryCount": self._coerce_int(headers.get("x-retry-count"), (payload or {}).get("retryCount")),
             "queueLatencyMillis": None,

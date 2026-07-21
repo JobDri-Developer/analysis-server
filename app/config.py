@@ -7,7 +7,7 @@ class Settings(BaseSettings):
 
     app_name: str = "jobdri-worker"
     environment: str = Field(default="local", alias="WORKER_ENV")
-    worker_log_type: str = Field(default="application", alias="APP_WORKER_LOG_TYPE")
+    worker_log_type: str = Field(default="worker", alias="APP_WORKER_LOG_TYPE")
 
     rabbitmq_host: str = Field(default="localhost", alias="RABBITMQ_HOST")
     rabbitmq_port: int = Field(default=5672, alias="RABBITMQ_PORT")

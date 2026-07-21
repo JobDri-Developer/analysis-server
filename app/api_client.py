@@ -170,7 +170,7 @@ class SpringWorkerApiClient:
         except requests.RequestException as exc:
             log_warning(
                 logger,
-                "worker.api.response",
+                "worker.api.failed",
                 "Spring API 요청이 전송되지 못했습니다.",
                 method="POST",
                 path=path,
@@ -205,7 +205,7 @@ class SpringWorkerApiClient:
         except requests.RequestException as exc:
             log_warning(
                 logger,
-                "worker.api.response",
+                "worker.api.failed",
                 "Spring API 요청이 전송되지 못했습니다.",
                 method="GET",
                 path=path,
@@ -254,7 +254,7 @@ class SpringWorkerApiClient:
         if response.status_code >= 500:
             log_warning(
                 logger,
-                "worker.api.response",
+                "worker.api.failed",
                 "Spring API 서버 오류를 수신했습니다.",
                 method=method,
                 path=path,
@@ -270,7 +270,7 @@ class SpringWorkerApiClient:
             if 400 <= response.status_code < 500:
                 log_error(
                     logger,
-                    "worker.api.response",
+                    "worker.api.failed",
                     "Spring API 클라이언트 오류 응답을 파싱하지 못했습니다.",
                     method=method,
                     path=path,
@@ -281,7 +281,7 @@ class SpringWorkerApiClient:
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
             log_warning(
                 logger,
-                "worker.api.response",
+                "worker.api.failed",
                 "Spring API 응답 파싱에 실패했습니다.",
                 method=method,
                 path=path,
@@ -297,7 +297,7 @@ class SpringWorkerApiClient:
             if 400 <= response.status_code < 500:
                 log_error(
                     logger,
-                    "worker.api.response",
+                    "worker.api.failed",
                     "Spring API 클라이언트 오류 응답이 스키마와 다릅니다.",
                     method=method,
                     path=path,
@@ -308,7 +308,7 @@ class SpringWorkerApiClient:
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
             log_warning(
                 logger,
-                "worker.api.response",
+                "worker.api.failed",
                 "Spring API 응답 스키마 검증에 실패했습니다.",
                 method=method,
                 path=path,
@@ -321,7 +321,7 @@ class SpringWorkerApiClient:
         if not envelope.isSuccess:
             log_error(
                 logger,
-                "worker.api.response",
+                "worker.api.failed",
                 "Spring API가 비성공 응답을 반환했습니다.",
                 method=method,
                 path=path,
