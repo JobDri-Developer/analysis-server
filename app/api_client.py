@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from typing import Any, TypeVar
 
 import requests
@@ -161,7 +162,9 @@ class SpringWorkerApiClient:
             "Spring API 요청을 전송합니다.",
             httpMethod="POST",
             path=path,
+            forwardedRequestId=request_headers.get("X-Request-Id"),
         )
+        started_at = monotonic()
         try:
             response = self._session.post(url, json=payload, headers=request_headers, timeout=30)
         except requests.RequestException as exc:
@@ -171,6 +174,7 @@ class SpringWorkerApiClient:
                 "Spring API 요청이 전송되지 못했습니다.",
                 httpMethod="POST",
                 path=path,
+                latencyMs=self._elapsed_millis(started_at),
                 errorCode="SPRING_API_REQUEST_FAILED",
                 error=str(exc),
             )
@@ -181,6 +185,7 @@ class SpringWorkerApiClient:
             path=path,
             method="POST",
             idempotent_conflict_as_success=idempotent_conflict_as_success,
+            latency_ms=self._elapsed_millis(started_at),
         )
 
     def _get(self, path: str) -> ApiEnvelope:
@@ -192,7 +197,9 @@ class SpringWorkerApiClient:
             "Spring API 요청을 전송합니다.",
             httpMethod="GET",
             path=path,
+            forwardedRequestId=request_headers.get("X-Request-Id"),
         )
+        started_at = monotonic()
         try:
             response = self._session.get(url, headers=request_headers, timeout=30)
         except requests.RequestException as exc:
@@ -202,12 +209,19 @@ class SpringWorkerApiClient:
                 "Spring API 요청이 전송되지 못했습니다.",
                 httpMethod="GET",
                 path=path,
+                latencyMs=self._elapsed_millis(started_at),
                 errorCode="SPRING_API_REQUEST_FAILED",
                 error=str(exc),
             )
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 
-        return self._validate_response(response, path=path, method="GET", idempotent_conflict_as_success=False)
+        return self._validate_response(
+            response,
+            path=path,
+            method="GET",
+            idempotent_conflict_as_success=False,
+            latency_ms=self._elapsed_millis(started_at),
+        )
 
     def _validate_response(
         self,
@@ -216,6 +230,7 @@ class SpringWorkerApiClient:
         path: str,
         method: str,
         idempotent_conflict_as_success: bool,
+        latency_ms: int,
     ) -> ApiEnvelope:
         if response.status_code == 409 and idempotent_conflict_as_success:
             log_info(
@@ -225,7 +240,9 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                latencyMs=latency_ms,
                 idempotentConflictAsSuccess=True,
+                responseCode="IDEMPOTENT_CONFLICT",
             )
             return ApiEnvelope(
                 isSuccess=True,
@@ -242,6 +259,7 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                latencyMs=latency_ms,
                 errorCode="SPRING_API_SERVER_ERROR",
             )
             raise RetryableWorkerError(f"Spring API 서버 오류: {response.status_code}")
@@ -257,6 +275,7 @@ class SpringWorkerApiClient:
                     httpMethod=method,
                     path=path,
                     statusCode=response.status_code,
+                    latencyMs=latency_ms,
                     errorCode="SPRING_API_CLIENT_ERROR",
                 )
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
@@ -267,6 +286,7 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                latencyMs=latency_ms,
                 errorCode="SPRING_API_RESPONSE_PARSE_FAILED",
             )
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
@@ -282,6 +302,7 @@ class SpringWorkerApiClient:
                     httpMethod=method,
                     path=path,
                     statusCode=response.status_code,
+                    latencyMs=latency_ms,
                     errorCode="SPRING_API_CLIENT_ERROR",
                 )
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
@@ -292,6 +313,7 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                latencyMs=latency_ms,
                 errorCode="SPRING_API_RESPONSE_SCHEMA_INVALID",
             )
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
@@ -304,6 +326,7 @@ class SpringWorkerApiClient:
                 httpMethod=method,
                 path=path,
                 statusCode=response.status_code,
+                latencyMs=latency_ms,
                 responseCode=envelope.code,
                 errorCode=envelope.code,
             )
@@ -316,6 +339,7 @@ class SpringWorkerApiClient:
             httpMethod=method,
             path=path,
             statusCode=response.status_code,
+            latencyMs=latency_ms,
             responseCode=envelope.code,
         )
         return envelope
@@ -330,3 +354,6 @@ class SpringWorkerApiClient:
     def _parse_result(self, envelope: ApiEnvelope, expected_type: type[T] | Any) -> T:
         adapter = TypeAdapter(expected_type)
         return adapter.validate_python(envelope.result)
+
+    def _elapsed_millis(self, started_at: float) -> int:
+        return max(int((monotonic() - started_at) * 1000), 0)

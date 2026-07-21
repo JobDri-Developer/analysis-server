@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     )
     rabbitmq_prefetch_count: int = Field(default=1, alias="WORKER_PREFETCH_COUNT")
 
-    spring_api_base_url: str = Field(default="http://localhost:8080", alias="SPRING_API_BASE_URL")
+    spring_api_base_url: str = Field(default="http://api:8080", alias="SPRING_API_BASE_URL")
     spring_internal_api_key: str = Field(alias="APP_WORKER_INTERNAL_API_KEY")
 
     openai_api_key: str = Field(alias="OPENAI_API_KEY")

@@ -97,6 +97,8 @@ class WorkerContextFilter(logging.Filter):
                 setattr(record, field_name, default_value)
         if not hasattr(record, "event"):
             setattr(record, "event", None)
+        if not hasattr(record, "errorCode"):
+            setattr(record, "errorCode", None)
         return True
 
 
@@ -107,6 +109,7 @@ class JsonLogFormatter(logging.Formatter):
             "level": record.levelname,
             "logger_name": record.name,
             "event": getattr(record, "event", None) or record.getMessage(),
+            "errorCode": getattr(record, "errorCode", None),
             "requestId": getattr(record, "requestId", None),
             "taskId": getattr(record, "taskId", None),
             "messageId": getattr(record, "messageId", None),
