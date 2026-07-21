@@ -194,12 +194,25 @@ class AnalysisQuestionAnalysisResponse(BaseModel):
     improvement: str
 
 
+class AnalysisHighlightItem(BaseModel):
+    title: str
+    quote: str
+
+
+class AnalysisMissingKeywordItem(BaseModel):
+    keyword: str
+    source: str
+
+
 class AnalysisLlmResponse(BaseModel):
     jobFit: int
     impact: int
     completeness: int
     feedback: str
-    questionAnalyses: list[AnalysisQuestionAnalysisResponse]
+    keyStrengths: list[AnalysisHighlightItem] = Field(default_factory=list)
+    keyWeaknesses: list[AnalysisHighlightItem] = Field(default_factory=list)
+    missingKeywords: list[AnalysisMissingKeywordItem] = Field(default_factory=list)
+    questionAnalyses: list[AnalysisQuestionAnalysisResponse] = Field(default_factory=list)
 
 
 class AnalysisWorkerRetryRequest(BaseModel):

@@ -103,7 +103,9 @@ from app.consumer import RabbitMqConsumer
 from app.logging_utils import WorkerContextFilter, bind_log_context
 from app.recovery import PendingDeliveryStore, TerminalMessageStore
 from app.schemas import (
+    AnalysisHighlightItem,
     AnalysisLlmResponse,
+    AnalysisMissingKeywordItem,
     AnalysisQuestionAnalysisResponse,
     AnalysisTaskMessage,
     AnalysisTaskStatusResponse,
@@ -187,11 +189,29 @@ class RecoveryFlowTests(unittest.TestCase):
             impact=75,
             completeness=90,
             feedback="good",
+            keyStrengths=[
+                AnalysisHighlightItem(
+                    title="구현 경험이 구체적으로 드러납니다.",
+                    quote="answer",
+                )
+            ],
+            keyWeaknesses=[
+                AnalysisHighlightItem(
+                    title="SQL 활용 경험 보강이 필요합니다.",
+                    quote="SQL 활용 경험",
+                )
+            ],
+            missingKeywords=[
+                AnalysisMissingKeywordItem(
+                    keyword="SQL 활용 경험",
+                    source="qualification",
+                )
+            ],
             questionAnalyses=[
                 AnalysisQuestionAnalysisResponse(
                     questionId=1,
                     sentence="answer",
-                    status="OK",
+                    status="mentioned",
                     reason="clear",
                     improvement="none",
                 )
@@ -296,6 +316,29 @@ class RecoveryFlowTests(unittest.TestCase):
             self.assertEqual(len(api_client.complete_analysis_calls), 1)
             self.assertEqual(store.list_entries(), [])
 
+    def test_analysis_complete_payload_contains_backend_contract_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            consumer = RabbitMqConsumer(
+                api_client=FakeApiClient(),
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                recovery_store=PendingDeliveryStore(temp_dir),
+                sleep_fn=lambda _: None,
+            )
+            message = self._build_message()
+
+            payload = consumer._build_analysis_complete_request(
+                message,
+                self._build_llm_response(),
+                queue_latency_millis=123,
+            ).model_dump(mode="json")
+
+            llm_response = payload["llmResponse"]
+            self.assertIn("keyStrengths", llm_response)
+            self.assertIn("keyWeaknesses", llm_response)
+            self.assertIn("missingKeywords", llm_response)
+            self.assertEqual(llm_response["questionAnalyses"][0]["status"], "mentioned")
+
     def test_store_analysis_result_treats_conflict_as_success(self) -> None:
         client = SpringWorkerApiClient()
         client._session.post = lambda *args, **kwargs: FakeResponse(
@@ -332,7 +375,7 @@ class RecoveryFlowTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(message.submittedAt.tzinfo)
-        self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-19T03:15:06.019055Z")
+        self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-20T07:55:06.019055Z")
 
     def test_analysis_task_message_accepts_iso_submitted_at(self) -> None:
         message = AnalysisTaskMessage.model_validate(
@@ -366,7 +409,7 @@ class RecoveryFlowTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(message.submittedAt.tzinfo)
-        self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-19T03:15:06Z")
+        self.assertEqual(message.model_dump(mode="json")["submittedAt"], "2026-07-20T07:55:06Z")
 
     def test_worker_context_filter_sets_defaults_for_missing_fields(self) -> None:
         log_record = logging.LogRecord(
