@@ -51,7 +51,7 @@ class ObservabilityLoggingTests(unittest.TestCase):
             if len(call.args) > 1 and call.args[1] == "worker.api.response"
         )
         self.assertEqual(response_log.kwargs["latencyMs"], 125)
-        self.assertEqual(response_log.kwargs["statusCode"], 200)
+        self.assertEqual(response_log.kwargs["status"], 200)
 
     def test_spring_api_request_log_includes_forwarded_request_id(self) -> None:
         client = SpringWorkerApiClient()
@@ -67,7 +67,7 @@ class ObservabilityLoggingTests(unittest.TestCase):
             },
         )
 
-        with patch("app.api_client.get_log_context", return_value={"requestId": "req-123"}), patch(
+        with patch("app.api_client.ensure_request_id", return_value="req-123"), patch(
             "app.api_client.log_info"
         ) as log_info_mock:
             client._post("/api/internal/test", {"hello": "world"})
@@ -90,6 +90,7 @@ class ObservabilityLoggingTests(unittest.TestCase):
                 client._get("/api/internal/test")
 
         failure_log = log_warning_mock.call_args
+        self.assertEqual(failure_log.args[1], "worker.api.failed")
         self.assertEqual(failure_log.kwargs["latencyMs"], 125)
         self.assertEqual(failure_log.kwargs["errorCode"], "SPRING_API_REQUEST_FAILED")
 
@@ -211,10 +212,11 @@ class ObservabilityLoggingTests(unittest.TestCase):
         record.taskId = "task-1"
         record.messageId = "msg-1"
         record.taskType = "ANALYSIS"
+        record.userId = 7
         record.workerId = "worker-1"
         record.retryCount = 2
         record.queueLatencyMillis = 15
-        record.logType = "application"
+        record.logType = "worker"
 
         payload = json.loads(formatter.format(record))
 
@@ -225,10 +227,11 @@ class ObservabilityLoggingTests(unittest.TestCase):
         self.assertEqual(payload["taskId"], "task-1")
         self.assertEqual(payload["messageId"], "msg-1")
         self.assertEqual(payload["taskType"], "ANALYSIS")
+        self.assertEqual(payload["userId"], 7)
         self.assertEqual(payload["workerId"], "worker-1")
         self.assertEqual(payload["retryCount"], 2)
         self.assertEqual(payload["queueLatencyMillis"], 15)
-        self.assertEqual(payload["logType"], "application")
+        self.assertEqual(payload["logType"], "worker")
 
 
 if __name__ == "__main__":
