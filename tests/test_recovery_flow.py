@@ -100,7 +100,7 @@ if "openai" not in sys.modules:
 from app.api_client import SpringWorkerApiClient
 from app.config import settings
 from app.consumer import RabbitMqConsumer
-from app.logging_utils import WorkerContextFilter
+from app.logging_utils import WorkerContextFilter, bind_log_context
 from app.recovery import PendingDeliveryStore, TerminalMessageStore
 from app.schemas import (
     AnalysisLlmResponse,
@@ -201,6 +201,7 @@ class RecoveryFlowTests(unittest.TestCase):
     def _build_message(self) -> AnalysisTaskMessage:
         return AnalysisTaskMessage(
             messageId="m-1",
+            requestId="req-1",
             taskType="ANALYSIS",
             taskId="task-1",
             userId=10,
@@ -227,7 +228,7 @@ class RecoveryFlowTests(unittest.TestCase):
             with patch.object(settings, "worker_api_retry_max_attempts", 1):
                 consumer._store_analysis_result(message, llm_response)
                 pending_entry = consumer._enqueue_pending_delivery(
-                    task_id=message.taskId,
+                    message=message,
                     delivery_kind="ANALYSIS_COMPLETE",
                     delivery_path=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
                     payload=consumer._build_analysis_complete_request(
@@ -250,6 +251,9 @@ class RecoveryFlowTests(unittest.TestCase):
             self.assertEqual(len(pending_entries), 1)
             self.assertEqual(pending_entries[0].taskId, message.taskId)
             self.assertEqual(pending_entries[0].deliveryKind, "ANALYSIS_COMPLETE")
+            self.assertEqual(pending_entries[0].requestId, message.requestId)
+            self.assertEqual(pending_entries[0].messageId, message.messageId)
+            self.assertEqual(pending_entries[0].taskType, message.taskType)
 
     def test_recovery_replays_pending_delivery_after_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -266,6 +270,10 @@ class RecoveryFlowTests(unittest.TestCase):
             store.upsert(
                 PendingDeliveryEntry(
                     taskId=message.taskId,
+                    requestId=message.requestId,
+                    messageId=message.messageId,
+                    taskType=message.taskType,
+                    retryCount=message.retryCount,
                     deliveryKind="ANALYSIS_COMPLETE",
                     deliveryPath=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
                     payload=request.model_dump(mode="json"),
@@ -372,10 +380,100 @@ class RecoveryFlowTests(unittest.TestCase):
         )
 
         self.assertTrue(WorkerContextFilter().filter(log_record))
-        self.assertEqual(log_record.taskId, "-")
-        self.assertEqual(log_record.messageId, "-")
-        self.assertEqual(log_record.workerId, "-")
-        self.assertEqual(log_record.retryCount, "-")
+        self.assertIsNone(log_record.taskId)
+        self.assertIsNone(log_record.messageId)
+        self.assertIsNone(log_record.workerId)
+        self.assertIsNone(log_record.retryCount)
+        self.assertEqual(log_record.logType, "application")
+
+    def test_deserialize_message_reads_headers(self) -> None:
+        consumer = RabbitMqConsumer(
+            api_client=FakeApiClient(),
+            openai_worker=object(),  # type: ignore[arg-type]
+            analysis_openai_worker=object(),  # type: ignore[arg-type]
+            sleep_fn=lambda _: None,
+        )
+        properties = sys.modules["pika"].BasicProperties(
+            headers={
+                "x-request-id": "req-header",
+                "x-task-id": "task-header",
+                "x-task-type": "ANALYSIS",
+                "x-retry-count": 2,
+                "x-message-id": "msg-header",
+            }
+        )
+        payload = {
+            "messageId": "m-1",
+            "taskType": "ANALYSIS",
+            "taskId": "task-1",
+            "userId": 10,
+            "mockApplyId": 20,
+            "retryCount": 0,
+            "maxRetryCount": 3,
+            "submittedAt": "2026-07-19T00:00:00Z",
+        }
+
+        message = consumer._deserialize_message(payload, properties)
+
+        self.assertEqual(message.requestId, "req-header")
+        self.assertEqual(message.taskId, "task-header")
+        self.assertEqual(message.taskType, "ANALYSIS")
+        self.assertEqual(message.retryCount, 2)
+        self.assertEqual(message.messageId, "msg-header")
+
+    def test_deserialize_message_generates_request_id_when_missing(self) -> None:
+        consumer = RabbitMqConsumer(
+            api_client=FakeApiClient(),
+            openai_worker=object(),  # type: ignore[arg-type]
+            analysis_openai_worker=object(),  # type: ignore[arg-type]
+            sleep_fn=lambda _: None,
+        )
+        payload = {
+            "messageId": "m-1",
+            "taskType": "ANALYSIS",
+            "taskId": "task-1",
+            "userId": 10,
+            "mockApplyId": 20,
+            "retryCount": 0,
+            "maxRetryCount": 3,
+            "submittedAt": "2026-07-19T00:00:00Z",
+        }
+
+        message = consumer._deserialize_message(payload, None)
+
+        self.assertIsNotNone(message.requestId)
+        self.assertTrue(message.requestId.startswith("worker-"))
+
+    def test_api_client_forwards_request_id_header(self) -> None:
+        client = SpringWorkerApiClient()
+        captured_headers: dict[str, str] = {}
+
+        def fake_post(*args, **kwargs):
+            captured_headers.update(kwargs.get("headers", {}))
+            return FakeResponse(
+                200,
+                {
+                    "isSuccess": True,
+                    "code": "OK",
+                    "message": "ok",
+                    "result": None,
+                    "error": None,
+                },
+            )
+
+        client._session.post = fake_post
+
+        with bind_log_context(requestId="req-forward"):
+            client.store_analysis_result(
+                "task-1",
+                AnalysisWorkerResultStoreRequest(
+                    userId=1,
+                    mockApplyId=2,
+                    llmResponse=self._build_llm_response(),
+                ),
+            )
+
+        self.assertEqual(captured_headers["X-Request-Id"], "req-forward")
 
     def test_on_message_acks_invalid_payload_after_deserialization_failure(self) -> None:
         consumer = RabbitMqConsumer(

@@ -5,7 +5,7 @@ import signal
 import threading
 
 from app.consumer import RabbitMqConsumer
-from app.logging_utils import configure_worker_logging
+from app.logging_utils import bind_log_context, configure_worker_logging, log_info
 
 
 configure_worker_logging()
@@ -18,21 +18,24 @@ def main() -> None:
     consumer = RabbitMqConsumer()
 
     def handle_signal(signum, _frame) -> None:  # type: ignore[no-untyped-def]
-        logger.info("종료 시그널을 수신했습니다. signal=%s", signum)
+        with bind_log_context():
+            log_info(logger, "worker.process.signal", "종료 시그널을 수신했습니다.", signal=signum)
         stop_event.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    with bind_log_context():
+        log_info(logger, "worker.process.started", "Worker process started.")
     consumer.start()
-    logger.info("Worker process started.")
 
     try:
         while not stop_event.wait(1):
             continue
     finally:
         consumer.stop()
-        logger.info("Worker process stopped.")
+        with bind_log_context():
+            log_info(logger, "worker.process.stopped", "Worker process stopped.")
 
 
 if __name__ == "__main__":
