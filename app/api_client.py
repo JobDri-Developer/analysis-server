@@ -8,7 +8,7 @@ import requests
 from pydantic import TypeAdapter
 
 from app.config import settings
-from app.logging_utils import get_log_context, log_error, log_info, log_warning
+from app.logging_utils import ensure_request_id, log_error, log_info, log_warning
 from app.schemas import (
     AnalysisTaskStatusResponse,
     AnalysisWorkerCompleteRequest,
@@ -160,9 +160,9 @@ class SpringWorkerApiClient:
             logger,
             "worker.api.request",
             "Spring API 요청을 전송합니다.",
-            httpMethod="POST",
+            method="POST",
             path=path,
-            forwardedRequestId=request_headers.get("X-Request-Id"),
+            forwardedRequestId=request_headers["X-Request-Id"],
         )
         started_at = monotonic()
         try:
@@ -172,7 +172,7 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.response",
                 "Spring API 요청이 전송되지 못했습니다.",
-                httpMethod="POST",
+                method="POST",
                 path=path,
                 latencyMs=self._elapsed_millis(started_at),
                 errorCode="SPRING_API_REQUEST_FAILED",
@@ -195,9 +195,9 @@ class SpringWorkerApiClient:
             logger,
             "worker.api.request",
             "Spring API 요청을 전송합니다.",
-            httpMethod="GET",
+            method="GET",
             path=path,
-            forwardedRequestId=request_headers.get("X-Request-Id"),
+            forwardedRequestId=request_headers["X-Request-Id"],
         )
         started_at = monotonic()
         try:
@@ -207,7 +207,7 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.response",
                 "Spring API 요청이 전송되지 못했습니다.",
-                httpMethod="GET",
+                method="GET",
                 path=path,
                 latencyMs=self._elapsed_millis(started_at),
                 errorCode="SPRING_API_REQUEST_FAILED",
@@ -237,9 +237,9 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.response",
                 "Spring API 멱등 충돌을 성공으로 처리했습니다.",
-                httpMethod=method,
+                method=method,
                 path=path,
-                statusCode=response.status_code,
+                status=response.status_code,
                 latencyMs=latency_ms,
                 idempotentConflictAsSuccess=True,
                 responseCode="IDEMPOTENT_CONFLICT",
@@ -256,9 +256,9 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.response",
                 "Spring API 서버 오류를 수신했습니다.",
-                httpMethod=method,
+                method=method,
                 path=path,
-                statusCode=response.status_code,
+                status=response.status_code,
                 latencyMs=latency_ms,
                 errorCode="SPRING_API_SERVER_ERROR",
             )
@@ -272,9 +272,9 @@ class SpringWorkerApiClient:
                     logger,
                     "worker.api.response",
                     "Spring API 클라이언트 오류 응답을 파싱하지 못했습니다.",
-                    httpMethod=method,
+                    method=method,
                     path=path,
-                    statusCode=response.status_code,
+                    status=response.status_code,
                     latencyMs=latency_ms,
                     errorCode="SPRING_API_CLIENT_ERROR",
                 )
@@ -283,9 +283,9 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.response",
                 "Spring API 응답 파싱에 실패했습니다.",
-                httpMethod=method,
+                method=method,
                 path=path,
-                statusCode=response.status_code,
+                status=response.status_code,
                 latencyMs=latency_ms,
                 errorCode="SPRING_API_RESPONSE_PARSE_FAILED",
             )
@@ -299,9 +299,9 @@ class SpringWorkerApiClient:
                     logger,
                     "worker.api.response",
                     "Spring API 클라이언트 오류 응답이 스키마와 다릅니다.",
-                    httpMethod=method,
+                    method=method,
                     path=path,
-                    statusCode=response.status_code,
+                    status=response.status_code,
                     latencyMs=latency_ms,
                     errorCode="SPRING_API_CLIENT_ERROR",
                 )
@@ -310,9 +310,9 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.response",
                 "Spring API 응답 스키마 검증에 실패했습니다.",
-                httpMethod=method,
+                method=method,
                 path=path,
-                statusCode=response.status_code,
+                status=response.status_code,
                 latencyMs=latency_ms,
                 errorCode="SPRING_API_RESPONSE_SCHEMA_INVALID",
             )
@@ -323,9 +323,9 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.response",
                 "Spring API가 비성공 응답을 반환했습니다.",
-                httpMethod=method,
+                method=method,
                 path=path,
-                statusCode=response.status_code,
+                status=response.status_code,
                 latencyMs=latency_ms,
                 responseCode=envelope.code,
                 errorCode=envelope.code,
@@ -336,20 +336,16 @@ class SpringWorkerApiClient:
             logger,
             "worker.api.response",
             "Spring API 응답을 수신했습니다.",
-            httpMethod=method,
+            method=method,
             path=path,
-            statusCode=response.status_code,
+            status=response.status_code,
             latencyMs=latency_ms,
             responseCode=envelope.code,
         )
         return envelope
 
     def _build_request_headers(self) -> dict[str, str]:
-        context = get_log_context()
-        request_id = context.get("requestId")
-        if isinstance(request_id, str) and request_id:
-            return {"X-Request-Id": request_id}
-        return {}
+        return {"X-Request-Id": ensure_request_id()}
 
     def _parse_result(self, envelope: ApiEnvelope, expected_type: type[T] | Any) -> T:
         adapter = TypeAdapter(expected_type)

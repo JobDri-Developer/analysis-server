@@ -273,6 +273,17 @@ class PendingDeliveryEntry(BaseModel):
     nextAttemptAt: str | None = None
 
 
+class TerminalMessageEntry(BaseModel):
+    version: int = 1
+    taskId: str
+    requestId: str | None = None
+    messageId: str
+    taskType: str
+    retryCount: int = 0
+    failureReason: str
+    recordedAt: str
+
+
 class RetryableWorkerError(Exception):
     def __init__(
         self,

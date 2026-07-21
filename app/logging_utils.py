@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterator
+from uuid import uuid4
 
 from app.config import settings
 
@@ -21,12 +23,26 @@ LOG_CONTEXT_FIELDS = (
 )
 SENSITIVE_FIELD_TOKENS = (
     "authorization",
+    "cookie",
+    "credential",
+    "email",
     "password",
     "paymentkey",
     "payment_key",
     "secret",
+    "session",
     "token",
+    "useremail",
     "api_key",
+)
+OPTIONAL_LOG_FIELDS = (
+    "taskProcessingLatencyMs",
+    "latencyMs",
+    "contextFetchLatencyMs",
+    "candidateFetchLatencyMs",
+    "resultStoreLatencyMs",
+    "finalizeDeliveryLatencyMs",
+    "completeDeliveryLatencyMs",
 )
 STANDARD_LOG_RECORD_FIELDS = set(logging.makeLogRecord({}).__dict__.keys()) | {"message", "asctime"}
 DEFAULT_LOG_CONTEXT: dict[str, Any] = {
@@ -43,10 +59,23 @@ _worker_log_context: ContextVar[dict[str, Any]] = ContextVar(
     "worker_log_context",
     default=DEFAULT_LOG_CONTEXT.copy(),
 )
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", flags=re.IGNORECASE)
+BEARER_TOKEN_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._\-+/=]+\b", flags=re.IGNORECASE)
+OPENAI_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+JWT_PATTERN = re.compile(r"\b[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b")
 
 
 def get_log_context() -> dict[str, Any]:
     return {**DEFAULT_LOG_CONTEXT, **_worker_log_context.get()}
+
+
+def set_log_context(**values: Any) -> dict[str, Any]:
+    context = get_log_context()
+    for key, value in values.items():
+        if key in LOG_CONTEXT_FIELDS:
+            context[key] = value
+    _worker_log_context.set(context)
+    return context
 
 
 @contextmanager
@@ -60,6 +89,17 @@ def bind_log_context(**values: Any) -> Iterator[None]:
         yield
     finally:
         _worker_log_context.reset(token)
+
+
+def ensure_request_id(prefix: str = "worker") -> str:
+    context = get_log_context()
+    request_id = context.get("requestId")
+    if isinstance(request_id, str) and request_id:
+        return request_id
+
+    request_id = f"{prefix}-{uuid4()}"
+    set_log_context(requestId=request_id)
+    return request_id
 
 
 def log_event(logger: logging.Logger, level: int, event: str, message: str | None = None, **fields: Any) -> None:
@@ -112,10 +152,12 @@ class JsonLogFormatter(logging.Formatter):
             "queueLatencyMillis": getattr(record, "queueLatencyMillis", None),
             "logType": getattr(record, "logType", settings.worker_log_type),
         }
+        for field_name in OPTIONAL_LOG_FIELDS:
+            payload[field_name] = getattr(record, field_name, None)
 
         message = record.getMessage()
         if message and message != payload["event"]:
-            payload["message"] = message
+            payload["message"] = _sanitize_string(message)
 
         for key, value in record.__dict__.items():
             if key in STANDARD_LOG_RECORD_FIELDS or key in payload:
@@ -123,9 +165,9 @@ class JsonLogFormatter(logging.Formatter):
             payload[key] = _sanitize_value(key, value)
 
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = _sanitize_string(self.formatException(record.exc_info))
         if record.stack_info:
-            payload["stack"] = self.formatStack(record.stack_info)
+            payload["stack"] = _sanitize_string(self.formatStack(record.stack_info))
 
         return json.dumps(payload, ensure_ascii=False)
 
@@ -152,8 +194,10 @@ def configure_worker_logging() -> None:
 def _sanitize_value(key: str, value: Any) -> Any:
     if _is_sensitive_key(key):
         return "***masked***"
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, int, float)):
         return value
+    if isinstance(value, str):
+        return _sanitize_string(value)
     if isinstance(value, datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
@@ -170,3 +214,11 @@ def _sanitize_value(key: str, value: Any) -> Any:
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
     return any(token in lowered for token in SENSITIVE_FIELD_TOKENS)
+
+
+def _sanitize_string(value: str) -> str:
+    sanitized = EMAIL_PATTERN.sub("***masked-email***", value)
+    sanitized = BEARER_TOKEN_PATTERN.sub("Bearer ***masked***", sanitized)
+    sanitized = OPENAI_KEY_PATTERN.sub("***masked-secret***", sanitized)
+    sanitized = JWT_PATTERN.sub("***masked-token***", sanitized)
+    return sanitized
