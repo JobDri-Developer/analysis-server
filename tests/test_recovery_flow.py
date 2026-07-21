@@ -100,7 +100,7 @@ if "openai" not in sys.modules:
 from app.api_client import SpringWorkerApiClient
 from app.config import settings
 from app.consumer import RabbitMqConsumer
-from app.logging_utils import WorkerContextFilter, bind_log_context
+from app.logging_utils import JsonLogFormatter, WorkerContextFilter, bind_log_context
 from app.openai_client import AnalysisOpenAiWorker
 from app.recovery import PendingDeliveryStore, TerminalMessageStore
 from app.schemas import (
@@ -526,6 +526,33 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIsNone(log_record.workerId)
         self.assertIsNone(log_record.retryCount)
         self.assertEqual(log_record.logType, "application")
+
+    def test_json_log_formatter_does_not_mask_token_usage_metrics(self) -> None:
+        log_record = logging.LogRecord(
+            name="app.openai_client",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="OpenAI analysis 호출이 완료되었습니다.",
+            args=(),
+            exc_info=None,
+        )
+        log_record.event = "openai.generate.completed"
+        log_record.inputTokens = 12000
+        log_record.outputTokens = 1500
+        log_record.totalTokens = 13500
+        log_record.cachedInputTokens = 1024
+        log_record.reasoningOutputTokens = 0
+        log_record.openai_api_key = "sk-test"
+
+        payload = json.loads(JsonLogFormatter().format(log_record))
+
+        self.assertEqual(payload["inputTokens"], 12000)
+        self.assertEqual(payload["outputTokens"], 1500)
+        self.assertEqual(payload["totalTokens"], 13500)
+        self.assertEqual(payload["cachedInputTokens"], 1024)
+        self.assertEqual(payload["reasoningOutputTokens"], 0)
+        self.assertEqual(payload["openai_api_key"], "***masked***")
 
     def test_deserialize_message_reads_headers(self) -> None:
         consumer = RabbitMqConsumer(
