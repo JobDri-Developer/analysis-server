@@ -157,6 +157,7 @@ class RabbitMqConsumer:
 
     def _on_message(self, channel, method, properties, body: bytes) -> None:  # type: ignore[no-untyped-def]
         incoming_context = self._extract_message_context(properties)
+        processing_started_at: float | None = None
         try:
             payload = json.loads(body.decode("utf-8"))
             incoming_context = self._extract_message_context(properties, payload)
@@ -197,6 +198,7 @@ class RabbitMqConsumer:
 
         try:
             with bind_log_context(**self._message_log_context(message)):
+                processing_started_at = monotonic()
                 log_info(
                     logger,
                     "queue.consume.started",
@@ -213,6 +215,7 @@ class RabbitMqConsumer:
                     "queue.consume.completed",
                     "RabbitMQ 메시지 소비가 완료되었습니다.",
                     deliveryTag=getattr(method, "delivery_tag", None),
+                    taskProcessingLatencyMs=self._elapsed_millis(processing_started_at),
                 )
                 self._ack_message(channel, method.delivery_tag, reason="processed-successfully", message=message)
         except NonRetryableWorkerError as exc:
@@ -225,6 +228,7 @@ class RabbitMqConsumer:
                     failureReason=exc.failure_reason,
                     errorCode=exc.failure_reason,
                     error=str(exc),
+                    taskProcessingLatencyMs=self._elapsed_millis(processing_started_at),
                 )
                 self._handle_non_retryable(channel, method.delivery_tag, message, body, properties, exc)
         except RetryableWorkerError as exc:
@@ -237,6 +241,7 @@ class RabbitMqConsumer:
                     failureReason=exc.failure_reason,
                     errorCode=exc.failure_reason,
                     error=str(exc),
+                    taskProcessingLatencyMs=self._elapsed_millis(processing_started_at),
                 )
                 self._retry_or_fail(channel, method.delivery_tag, properties, message, body, exc)
         except Exception as exc:
@@ -248,6 +253,7 @@ class RabbitMqConsumer:
                     deliveryTag=getattr(method, "delivery_tag", None),
                     failureReason="INTERNAL_ERROR",
                     errorCode="INTERNAL_ERROR",
+                    taskProcessingLatencyMs=self._elapsed_millis(processing_started_at),
                 )
                 retryable_exc = RetryableWorkerError(str(exc), failure_reason="INTERNAL_ERROR")
                 self._retry_or_fail(channel, method.delivery_tag, properties, message, body, retryable_exc)
@@ -1450,7 +1456,9 @@ class RabbitMqConsumer:
     def _generate_request_id(self) -> str:
         return f"worker-{uuid4()}"
 
-    def _elapsed_millis(self, started_at: float) -> int:
+    def _elapsed_millis(self, started_at: float | None) -> int | None:
+        if started_at is None:
+            return None
         return max(int((monotonic() - started_at) * 1000), 0)
 
     def _utcnow(self) -> datetime:
