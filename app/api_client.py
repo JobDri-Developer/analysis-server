@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, TypeVar
 
 import requests
 from pydantic import TypeAdapter
 
 from app.config import settings
+from app.logging_utils import get_log_context, log_error, log_info, log_warning
 from app.schemas import (
     AnalysisTaskStatusResponse,
     AnalysisWorkerCompleteRequest,
@@ -32,6 +34,8 @@ from app.schemas import (
 )
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 
 class SpringWorkerApiClient:
@@ -69,8 +73,10 @@ class SpringWorkerApiClient:
         )
 
     def fail_job_posting_task(self, task_id: str, request: JobPostingWorkerFailureRequest) -> None:
-        payload = request.model_dump(mode="json")
-        self._post(f"/api/internal/worker/job-postings/tasks/{task_id}/failed", payload)
+        self._post(
+            f"/api/internal/worker/job-postings/tasks/{task_id}/failed",
+            request.model_dump(mode="json"),
+        )
 
     def get_job_posting_task(self, task_id: str) -> JobPostingTaskStatusResponse:
         response = self._get(f"/api/internal/worker/job-postings/tasks/{task_id}")
@@ -148,12 +154,79 @@ class SpringWorkerApiClient:
         idempotent_conflict_as_success: bool = False,
     ) -> ApiEnvelope:
         url = settings.spring_api_base_url.rstrip("/") + path
+        request_headers = self._build_request_headers()
+        log_info(
+            logger,
+            "worker.api.request",
+            "Spring API 요청을 전송합니다.",
+            httpMethod="POST",
+            path=path,
+        )
         try:
-            response = self._session.post(url, json=payload, timeout=30)
+            response = self._session.post(url, json=payload, headers=request_headers, timeout=30)
         except requests.RequestException as exc:
+            log_warning(
+                logger,
+                "worker.api.response",
+                "Spring API 요청이 전송되지 못했습니다.",
+                httpMethod="POST",
+                path=path,
+                errorCode="SPRING_API_REQUEST_FAILED",
+                error=str(exc),
+            )
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 
+        return self._validate_response(
+            response,
+            path=path,
+            method="POST",
+            idempotent_conflict_as_success=idempotent_conflict_as_success,
+        )
+
+    def _get(self, path: str) -> ApiEnvelope:
+        url = settings.spring_api_base_url.rstrip("/") + path
+        request_headers = self._build_request_headers()
+        log_info(
+            logger,
+            "worker.api.request",
+            "Spring API 요청을 전송합니다.",
+            httpMethod="GET",
+            path=path,
+        )
+        try:
+            response = self._session.get(url, headers=request_headers, timeout=30)
+        except requests.RequestException as exc:
+            log_warning(
+                logger,
+                "worker.api.response",
+                "Spring API 요청이 전송되지 못했습니다.",
+                httpMethod="GET",
+                path=path,
+                errorCode="SPRING_API_REQUEST_FAILED",
+                error=str(exc),
+            )
+            raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
+
+        return self._validate_response(response, path=path, method="GET", idempotent_conflict_as_success=False)
+
+    def _validate_response(
+        self,
+        response: Any,
+        *,
+        path: str,
+        method: str,
+        idempotent_conflict_as_success: bool,
+    ) -> ApiEnvelope:
         if response.status_code == 409 and idempotent_conflict_as_success:
+            log_info(
+                logger,
+                "worker.api.response",
+                "Spring API 멱등 충돌을 성공으로 처리했습니다.",
+                httpMethod=method,
+                path=path,
+                statusCode=response.status_code,
+                idempotentConflictAsSuccess=True,
+            )
             return ApiEnvelope(
                 isSuccess=True,
                 code="IDEMPOTENT_CONFLICT",
@@ -162,53 +235,97 @@ class SpringWorkerApiClient:
                 error=None,
             )
         if response.status_code >= 500:
+            log_warning(
+                logger,
+                "worker.api.response",
+                "Spring API 서버 오류를 수신했습니다.",
+                httpMethod=method,
+                path=path,
+                statusCode=response.status_code,
+                errorCode="SPRING_API_SERVER_ERROR",
+            )
             raise RetryableWorkerError(f"Spring API 서버 오류: {response.status_code}")
 
         try:
             payload_data = response.json()
         except Exception as exc:
             if 400 <= response.status_code < 500:
+                log_error(
+                    logger,
+                    "worker.api.response",
+                    "Spring API 클라이언트 오류 응답을 파싱하지 못했습니다.",
+                    httpMethod=method,
+                    path=path,
+                    statusCode=response.status_code,
+                    errorCode="SPRING_API_CLIENT_ERROR",
+                )
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
+            log_warning(
+                logger,
+                "worker.api.response",
+                "Spring API 응답 파싱에 실패했습니다.",
+                httpMethod=method,
+                path=path,
+                statusCode=response.status_code,
+                errorCode="SPRING_API_RESPONSE_PARSE_FAILED",
+            )
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
 
         try:
             envelope = ApiEnvelope.model_validate(payload_data)
         except Exception as exc:
             if 400 <= response.status_code < 500:
+                log_error(
+                    logger,
+                    "worker.api.response",
+                    "Spring API 클라이언트 오류 응답이 스키마와 다릅니다.",
+                    httpMethod=method,
+                    path=path,
+                    statusCode=response.status_code,
+                    errorCode="SPRING_API_CLIENT_ERROR",
+                )
                 raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
+            log_warning(
+                logger,
+                "worker.api.response",
+                "Spring API 응답 스키마 검증에 실패했습니다.",
+                httpMethod=method,
+                path=path,
+                statusCode=response.status_code,
+                errorCode="SPRING_API_RESPONSE_SCHEMA_INVALID",
+            )
             raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
 
         if not envelope.isSuccess:
+            log_error(
+                logger,
+                "worker.api.response",
+                "Spring API가 비성공 응답을 반환했습니다.",
+                httpMethod=method,
+                path=path,
+                statusCode=response.status_code,
+                responseCode=envelope.code,
+                errorCode=envelope.code,
+            )
             raise NonRetryableWorkerError(str(envelope.error or envelope.message))
+
+        log_info(
+            logger,
+            "worker.api.response",
+            "Spring API 응답을 수신했습니다.",
+            httpMethod=method,
+            path=path,
+            statusCode=response.status_code,
+            responseCode=envelope.code,
+        )
         return envelope
 
-    def _get(self, path: str) -> ApiEnvelope:
-        url = settings.spring_api_base_url.rstrip("/") + path
-        try:
-            response = self._session.get(url, timeout=30)
-        except requests.RequestException as exc:
-            raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
-
-        if response.status_code >= 500:
-            raise RetryableWorkerError(f"Spring API 서버 오류: {response.status_code}")
-
-        try:
-            payload_data = response.json()
-        except Exception as exc:
-            if 400 <= response.status_code < 500:
-                raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
-            raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
-
-        try:
-            envelope = ApiEnvelope.model_validate(payload_data)
-        except Exception as exc:
-            if 400 <= response.status_code < 500:
-                raise NonRetryableWorkerError(f"Spring API 클라이언트 오류: {response.status_code}") from exc
-            raise RetryableWorkerError("Spring API 응답 파싱 실패") from exc
-
-        if not envelope.isSuccess:
-            raise NonRetryableWorkerError(str(envelope.error or envelope.message))
-        return envelope
+    def _build_request_headers(self) -> dict[str, str]:
+        context = get_log_context()
+        request_id = context.get("requestId")
+        if isinstance(request_id, str) and request_id:
+            return {"X-Request-Id": request_id}
+        return {}
 
     def _parse_result(self, envelope: ApiEnvelope, expected_type: type[T] | Any) -> T:
         adapter = TypeAdapter(expected_type)

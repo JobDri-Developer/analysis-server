@@ -6,6 +6,7 @@ import re
 import threading
 from pathlib import Path
 
+from app.logging_utils import log_exception
 from app.schemas import PendingDeliveryEntry
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,12 @@ class PendingDeliveryStore:
             try:
                 entries.append(PendingDeliveryEntry.model_validate_json(path.read_text(encoding="utf-8")))
             except Exception:
-                logger.exception("pending delivery spool 파일을 읽지 못했습니다. path=%s", path)
+                log_exception(
+                    logger,
+                    "worker.recovery.spool.read_failed",
+                    "pending delivery spool 파일을 읽지 못했습니다.",
+                    path=str(path),
+                )
         return entries
 
     def _path_for(self, entry: PendingDeliveryEntry) -> Path:

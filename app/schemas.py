@@ -16,6 +16,7 @@ class ApiEnvelope(BaseModel):
 
 class JobPostingIngestTaskMessage(BaseModel):
     messageId: str
+    requestId: str | None = None
     taskType: Literal["JOB_POSTING_INGEST"]
     taskId: str
     userId: int
@@ -142,6 +143,7 @@ class JobPostingTaskStatusResponse(BaseModel):
 
 class AnalysisTaskMessage(BaseModel):
     messageId: str
+    requestId: str | None = None
     taskType: Literal["ANALYSIS"]
     taskId: str
     userId: int
@@ -258,6 +260,10 @@ DeliveryKind = Literal["ANALYSIS_COMPLETE", "JOB_POSTING_FINALIZE"]
 class PendingDeliveryEntry(BaseModel):
     version: int = 1
     taskId: str
+    requestId: str | None = None
+    messageId: str | None = None
+    taskType: str | None = None
+    retryCount: int = 0
     deliveryKind: DeliveryKind
     deliveryPath: str
     payload: dict[str, Any]
