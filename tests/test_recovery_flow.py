@@ -389,6 +389,54 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIn("questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다", prompt)
         self.assertIn("questionId=12\n  question=추가로 강조하고 싶은 내용을 작성해주세요.\n  answer=\n  charLimit=700", prompt)
 
+    def test_analysis_usage_fields_include_token_counts(self) -> None:
+        worker = AnalysisOpenAiWorker()
+        response = types.SimpleNamespace(
+            usage=types.SimpleNamespace(
+                input_tokens=12000,
+                output_tokens=1500,
+                total_tokens=13500,
+                input_tokens_details=types.SimpleNamespace(cached_tokens=1024),
+                output_tokens_details=types.SimpleNamespace(reasoning_tokens=0),
+            )
+        )
+
+        usage_fields = worker._extract_usage_fields(response)
+
+        self.assertEqual(
+            usage_fields,
+            {
+                "inputTokens": 12000,
+                "outputTokens": 1500,
+                "totalTokens": 13500,
+                "cachedInputTokens": 1024,
+                "reasoningOutputTokens": 0,
+            },
+        )
+
+    def test_analysis_usage_fields_support_dict_response(self) -> None:
+        worker = AnalysisOpenAiWorker()
+        response = types.SimpleNamespace(
+            usage={
+                "input_tokens": 9000,
+                "output_tokens": 1000,
+                "total_tokens": 10000,
+                "input_tokens_details": {"cached_tokens": 512},
+            }
+        )
+
+        usage_fields = worker._extract_usage_fields(response)
+
+        self.assertEqual(
+            usage_fields,
+            {
+                "inputTokens": 9000,
+                "outputTokens": 1000,
+                "totalTokens": 10000,
+                "cachedInputTokens": 512,
+            },
+        )
+
     def test_store_analysis_result_treats_conflict_as_success(self) -> None:
         client = SpringWorkerApiClient()
         client._session.post = lambda *args, **kwargs: FakeResponse(

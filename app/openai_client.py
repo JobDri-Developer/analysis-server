@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from time import monotonic
+from typing import Any
 
 from pydantic import ValidationError
 from openai import APIConnectionError, APIStatusError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
@@ -394,6 +395,7 @@ class AnalysisOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = AnalysisLlmResponse.model_validate(payload)
             request_id = self._extract_request_id(response)
+            usage_fields = self._extract_usage_fields(response)
             log_info(
                 logger,
                 "openai.generate.completed",
@@ -402,6 +404,7 @@ class AnalysisOpenAiWorker:
                 operation="analysis",
                 latencyMs=self._elapsed_millis(started_at),
                 openaiRequestId=request_id,
+                **usage_fields,
             )
             return result, request_id
         except RateLimitError as exc:
@@ -473,6 +476,46 @@ class AnalysisOpenAiWorker:
 
     def _elapsed_millis(self, started_at: float) -> int:
         return max(int((monotonic() - started_at) * 1000), 0)
+
+    def _extract_usage_fields(self, response: object) -> dict[str, int]:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return {}
+
+        input_tokens = self._read_usage_int(usage, "input_tokens")
+        output_tokens = self._read_usage_int(usage, "output_tokens")
+        total_tokens = self._read_usage_int(usage, "total_tokens")
+        input_details = self._read_usage_value(usage, "input_tokens_details")
+        output_details = self._read_usage_value(usage, "output_tokens_details")
+
+        fields: dict[str, int] = {}
+        if input_tokens is not None:
+            fields["inputTokens"] = input_tokens
+        if output_tokens is not None:
+            fields["outputTokens"] = output_tokens
+        if total_tokens is not None:
+            fields["totalTokens"] = total_tokens
+
+        cached_tokens = self._read_usage_int(input_details, "cached_tokens")
+        if cached_tokens is not None:
+            fields["cachedInputTokens"] = cached_tokens
+
+        reasoning_tokens = self._read_usage_int(output_details, "reasoning_tokens")
+        if reasoning_tokens is not None:
+            fields["reasoningOutputTokens"] = reasoning_tokens
+
+        return fields
+
+    def _read_usage_int(self, source: Any, key: str) -> int | None:
+        value = self._read_usage_value(source, key)
+        return value if isinstance(value, int) else None
+
+    def _read_usage_value(self, source: Any, key: str) -> Any:
+        if source is None:
+            return None
+        if isinstance(source, dict):
+            return source.get(key)
+        return getattr(source, key, None)
 
     def _log_openai_failure(
         self,
