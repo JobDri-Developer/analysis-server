@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import requests
 
 from app.api_client import SpringWorkerApiClient
 from app.consumer import RabbitMqConsumer
+from app.logging_utils import JsonLogFormatter
 from app.schemas import JobPostingIngestTaskMessage, RetryableWorkerError
 
 
@@ -50,6 +52,30 @@ class ObservabilityLoggingTests(unittest.TestCase):
         )
         self.assertEqual(response_log.kwargs["latencyMs"], 125)
         self.assertEqual(response_log.kwargs["statusCode"], 200)
+
+    def test_spring_api_request_log_includes_forwarded_request_id(self) -> None:
+        client = SpringWorkerApiClient()
+        client._session = MagicMock()
+        client._session.post.return_value = _DummyResponse(
+            200,
+            {
+                "isSuccess": True,
+                "code": "OK",
+                "message": "ok",
+                "result": None,
+                "error": None,
+            },
+        )
+
+        with patch("app.api_client.get_log_context", return_value={"requestId": "req-123"}), patch(
+            "app.api_client.log_info"
+        ) as log_info_mock:
+            client._post("/api/internal/test", {"hello": "world"})
+
+        request_log = next(
+            call for call in log_info_mock.call_args_list if len(call.args) > 1 and call.args[1] == "worker.api.request"
+        )
+        self.assertEqual(request_log.kwargs["forwardedRequestId"], "req-123")
 
     def test_spring_api_failure_log_includes_latency(self) -> None:
         client = SpringWorkerApiClient()
@@ -167,6 +193,42 @@ class ObservabilityLoggingTests(unittest.TestCase):
             if len(call.args) > 1 and call.args[1] == "queue.consume.failed"
         )
         self.assertEqual(failed_log.kwargs["taskProcessingLatencyMs"], 125)
+
+    def test_json_log_formatter_includes_required_observability_fields(self) -> None:
+        formatter = JsonLogFormatter()
+        record = logging.LogRecord(
+            name="app.consumer",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="queue.consume.started",
+            args=(),
+            exc_info=None,
+        )
+        record.event = "queue.consume.started"
+        record.errorCode = None
+        record.requestId = "req-1"
+        record.taskId = "task-1"
+        record.messageId = "msg-1"
+        record.taskType = "ANALYSIS"
+        record.workerId = "worker-1"
+        record.retryCount = 2
+        record.queueLatencyMillis = 15
+        record.logType = "application"
+
+        payload = json.loads(formatter.format(record))
+
+        self.assertEqual(payload["event"], "queue.consume.started")
+        self.assertIn("timestamp", payload)
+        self.assertIsNone(payload["errorCode"])
+        self.assertEqual(payload["requestId"], "req-1")
+        self.assertEqual(payload["taskId"], "task-1")
+        self.assertEqual(payload["messageId"], "msg-1")
+        self.assertEqual(payload["taskType"], "ANALYSIS")
+        self.assertEqual(payload["workerId"], "worker-1")
+        self.assertEqual(payload["retryCount"], 2)
+        self.assertEqual(payload["queueLatencyMillis"], 15)
+        self.assertEqual(payload["logType"], "application")
 
 
 if __name__ == "__main__":

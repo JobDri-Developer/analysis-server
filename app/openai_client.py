@@ -60,6 +60,7 @@ class JobPostingOpenAiWorker:
                 model=self._model,
                 latencyMs=self._elapsed_millis(started_at),
                 openaiRequestId=self._extract_request_id(response),
+                errorCode="VALIDATION_ERROR",
                 error=str(exc),
             )
             raise NonRetryableWorkerError(
@@ -108,6 +109,7 @@ class JobPostingOpenAiWorker:
                 model=self._model,
                 latencyMs=self._elapsed_millis(started_at),
                 openaiRequestId=self._extract_request_id(response),
+                errorCode="VALIDATION_ERROR",
                 error=str(exc),
             )
             top = candidates[0]
@@ -159,6 +161,7 @@ class JobPostingOpenAiWorker:
                 model=self._model,
                 latencyMs=self._elapsed_millis(started_at),
                 openaiRequestId=self._extract_request_id(response),
+                errorCode="VALIDATION_ERROR",
                 error=str(exc),
             )
             return JobPostingGenerateResponse(
@@ -275,8 +278,18 @@ class JobPostingOpenAiWorker:
             model=self._model,
             latencyMs=self._elapsed_millis(started_at),
             openaiRequestId=self._extract_request_id(exc),
+            errorCode=self._derive_error_code(exc),
             error=str(exc),
         )
+
+    def _derive_error_code(self, exc: Exception) -> str:
+        if isinstance(exc, RateLimitError):
+            return "RATE_LIMIT"
+        if isinstance(exc, (APITimeoutError, APIConnectionError)):
+            return "OPENAI_TIMEOUT"
+        if isinstance(exc, (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError)):
+            return "VALIDATION_ERROR"
+        return "INTERNAL_ERROR"
 
     def _build_extract_prompt(self, raw_text: str, has_image: bool) -> str:
         return f"""
@@ -533,8 +546,18 @@ class AnalysisOpenAiWorker:
             operation=operation,
             latencyMs=self._elapsed_millis(started_at),
             openaiRequestId=self._extract_request_id(exc),
+            errorCode=self._derive_error_code(exc),
             error=str(exc),
         )
+
+    def _derive_error_code(self, exc: Exception) -> str:
+        if isinstance(exc, RateLimitError):
+            return "RATE_LIMIT"
+        if isinstance(exc, (APITimeoutError, APIConnectionError)):
+            return "OPENAI_TIMEOUT"
+        if isinstance(exc, (BadRequestError, json.JSONDecodeError, ValueError)):
+            return "VALIDATION_ERROR"
+        return "INTERNAL_ERROR"
 
     def _build_analysis_prompt(self, context: AnalysisWorkerContextResponse) -> str:
         question_block = "\n".join(

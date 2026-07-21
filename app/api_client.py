@@ -162,6 +162,7 @@ class SpringWorkerApiClient:
             "Spring API 요청을 전송합니다.",
             httpMethod="POST",
             path=path,
+            forwardedRequestId=request_headers.get("X-Request-Id"),
         )
         started_at = monotonic()
         try:
@@ -196,6 +197,7 @@ class SpringWorkerApiClient:
             "Spring API 요청을 전송합니다.",
             httpMethod="GET",
             path=path,
+            forwardedRequestId=request_headers.get("X-Request-Id"),
         )
         started_at = monotonic()
         try:
@@ -240,6 +242,7 @@ class SpringWorkerApiClient:
                 statusCode=response.status_code,
                 latencyMs=latency_ms,
                 idempotentConflictAsSuccess=True,
+                responseCode="IDEMPOTENT_CONFLICT",
             )
             return ApiEnvelope(
                 isSuccess=True,

@@ -49,6 +49,7 @@ class PendingDeliveryStore:
                     "worker.recovery.spool.read_failed",
                     "pending delivery spool 파일을 읽지 못했습니다.",
                     path=str(path),
+                    errorCode="RECOVERY_SPOOL_READ_FAILED",
                 )
         return entries
 
