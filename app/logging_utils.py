@@ -45,6 +45,13 @@ OPTIONAL_LOG_FIELDS = (
     "finalizeDeliveryLatencyMs",
     "completeDeliveryLatencyMs",
 )
+NON_SENSITIVE_TOKEN_METRIC_FIELDS = {
+    "inputtokens",
+    "outputtokens",
+    "totaltokens",
+    "cachedinputtokens",
+    "reasoningoutputtokens",
+}
 STANDARD_LOG_RECORD_FIELDS = set(logging.makeLogRecord({}).__dict__.keys()) | {"message", "asctime"}
 DEFAULT_LOG_CONTEXT: dict[str, Any] = {
     "requestId": None,
@@ -216,6 +223,8 @@ def _sanitize_value(key: str, value: Any) -> Any:
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
+    if lowered in NON_SENSITIVE_TOKEN_METRIC_FIELDS:
+        return False
     return any(token in lowered for token in SENSITIVE_FIELD_TOKENS)
 
 
