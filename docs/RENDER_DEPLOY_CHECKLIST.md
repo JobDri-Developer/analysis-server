@@ -9,7 +9,7 @@
 ## 2. 배포 전 확인
 
 - [ ] `Dockerfile`이 현재 디렉터리를 기준으로 빌드되도록 설정되어 있다.
-- [ ] 워커 시작 명령이 `python -m app.worker` 로 설정되어 있다.
+- [ ] 워커 시작 명령이 `uvicorn app.main:app --host 0.0.0.0 --port 8000` 로 설정되어 있다.
 - [ ] Render에서 RabbitMQ와 Spring API에 네트워크 접근이 가능하다.
 - [ ] OpenAI API 키를 Render 환경변수에 등록할 수 있다.
 
@@ -68,3 +68,4 @@
 - [ ] OpenAI 호출 실패 시 재시도 정책이 의도대로 동작한다.
 - [ ] DLQ 라우팅이 정상 동작한다.
 - [ ] Render 재배포 후 워커가 자동으로 다시 연결된다.
+- [ ] `GET /metrics` 가 Prometheus scrape 가능한 포맷으로 응답한다.

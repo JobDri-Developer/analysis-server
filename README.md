@@ -301,28 +301,22 @@ APP_WORKER_ANALYSIS_DLQ=jobdri.analysis.execute.dlq
 ### 10.3 워커 실행
 
 ```bash
-python3 -m app.worker
-```
-
-### 10.4 선택: Health Check 서버 실행
-
-플랫폼 특성상 HTTP health endpoint가 필요하면 FastAPI 앱을 띄울 수 있습니다.
-
-```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 - health endpoint
   `GET /health`
+- metrics endpoint
+  `GET /metrics`
 
-다만 기본 Docker 실행은 HTTP 서버가 아니라 백그라운드 워커 프로세스(`python -m app.worker`) 기준입니다.
+FastAPI 앱 startup에서 RabbitMQ consumer도 함께 시작되므로, 별도 백그라운드 워커 프로세스를 추가로 띄우지 않습니다.
 
 ## 11. Docker 배포
 
 이미지는 [`Dockerfile`](/Users/shinae/Desktop/study/analysis-server/Dockerfile) 기준으로 빌드되며 기본 실행 명령은 아래와 같습니다.
 
 ```dockerfile
-CMD ["python", "-m", "app.worker"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 운영 배포 예시는 [`deploy/docker-compose.worker.prod.yml`](/Users/shinae/Desktop/study/analysis-server/deploy/docker-compose.worker.prod.yml) 에 있습니다.
