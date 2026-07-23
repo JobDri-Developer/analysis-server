@@ -10,6 +10,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, BadReque
 
 from app.config import settings
 from app.logging_utils import log_info, log_warning
+from app.metrics import observe_llm_request
 from app.schemas import (
     AnalysisLlmResponse,
     AnalysisWorkerContextResponse,
@@ -30,6 +31,7 @@ class JobPostingOpenAiWorker:
         self._model = settings.openai_job_posting_model
 
     def extract(self, raw_text: str | None, image_url: str | None) -> JobPostingExtractResponse:
+        operation = "job-posting-extract"
         prompt = self._build_extract_prompt(raw_text or "", image_url is not None)
         content = [{"type": "input_text", "text": prompt}]
         if image_url:
@@ -53,6 +55,7 @@ class JobPostingOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = JobPostingExtractResponse.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             log_warning(
                 logger,
                 "openai.extract.failed",
@@ -68,6 +71,10 @@ class JobPostingOpenAiWorker:
                 failure_reason="VALIDATION_ERROR",
                 openai_request_id=self._extract_request_id(response),
             ) from exc
+        except (RetryableWorkerError, NonRetryableWorkerError):
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
+            raise
+        observe_llm_request(operation, "succeeded", self._elapsed_seconds(started_at))
         log_info(
             logger,
             "openai.extract.completed",
@@ -83,6 +90,7 @@ class JobPostingOpenAiWorker:
         extracted: JobPostingExtractResponse,
         candidates: list[JobPostingClassificationCandidateResponse],
     ) -> JobPostingClassificationResultResponse:
+        operation = "job-posting-classify"
         prompt = self._build_classification_prompt(extracted, candidates)
         started_at = monotonic()
         log_info(
@@ -102,6 +110,7 @@ class JobPostingOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = JobPostingClassificationResultResponse.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             log_warning(
                 logger,
                 "openai.classify.failed",
@@ -121,6 +130,10 @@ class JobPostingOpenAiWorker:
                 reason="LLM 분류 실패로 1순위 후보를 fallback으로 사용했습니다.",
                 confidence=top.score,
             )
+        except (RetryableWorkerError, NonRetryableWorkerError):
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
+            raise
+        observe_llm_request(operation, "succeeded", self._elapsed_seconds(started_at))
         log_info(
             logger,
             "openai.classify.completed",
@@ -136,6 +149,7 @@ class JobPostingOpenAiWorker:
         extracted: JobPostingExtractResponse,
         classification: JobPostingClassificationResultResponse,
     ) -> JobPostingGenerateResponse:
+        operation = "job-posting-generate"
         prompt = self._build_generation_prompt(extracted, classification)
         started_at = monotonic()
         log_info(
@@ -154,6 +168,7 @@ class JobPostingOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = JobPostingGenerateResponse.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             log_warning(
                 logger,
                 "openai.generate.failed",
@@ -172,6 +187,10 @@ class JobPostingOpenAiWorker:
                 preferredQualifications=extracted.preferredQualifications,
                 summary="생성 실패로 추출 결과를 기반으로 fallback 응답을 사용했습니다.",
             )
+        except (RetryableWorkerError, NonRetryableWorkerError):
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
+            raise
+        observe_llm_request(operation, "succeeded", self._elapsed_seconds(started_at))
         log_info(
             logger,
             "openai.generate.completed",
@@ -269,6 +288,9 @@ class JobPostingOpenAiWorker:
 
     def _elapsed_millis(self, started_at: float) -> int:
         return max(int((monotonic() - started_at) * 1000), 0)
+
+    def _elapsed_seconds(self, started_at: float) -> float:
+        return max(monotonic() - started_at, 0.0)
 
     def _log_openai_failure(self, event_prefix: str, started_at: float, exc: Exception) -> None:
         log_warning(
@@ -388,6 +410,7 @@ class AnalysisOpenAiWorker:
         self._model = settings.openai_analysis_model
 
     def analyze(self, context: AnalysisWorkerContextResponse) -> tuple[AnalysisLlmResponse, str | None]:
+        operation = "analysis-final"
         prompt = self._build_analysis_prompt(context)
         started_at = monotonic()
         log_info(
@@ -419,9 +442,11 @@ class AnalysisOpenAiWorker:
                 openaiRequestId=request_id,
                 **usage_fields,
             )
+            observe_llm_request(operation, "succeeded", self._elapsed_seconds(started_at))
             return result, request_id
         except RateLimitError as exc:
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             raise RetryableWorkerError(
                 f"OpenAI rate limit 발생: {exc}",
                 failure_reason="RATE_LIMIT",
@@ -429,6 +454,7 @@ class AnalysisOpenAiWorker:
             ) from exc
         except APITimeoutError as exc:
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             raise RetryableWorkerError(
                 f"OpenAI timeout 발생: {exc}",
                 failure_reason="OPENAI_TIMEOUT",
@@ -436,6 +462,7 @@ class AnalysisOpenAiWorker:
             ) from exc
         except (BadRequestError, json.JSONDecodeError, ValueError) as exc:
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             raise NonRetryableWorkerError(
                 f"OpenAI 입력/응답 검증 실패: {exc}",
                 failure_reason="VALIDATION_ERROR",
@@ -443,6 +470,7 @@ class AnalysisOpenAiWorker:
             ) from exc
         except APIConnectionError as exc:
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             raise RetryableWorkerError(
                 f"OpenAI 연결 실패: {exc}",
                 failure_reason="OPENAI_TIMEOUT",
@@ -450,6 +478,7 @@ class AnalysisOpenAiWorker:
             ) from exc
         except APIStatusError as exc:
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             failure_reason = "INTERNAL_ERROR"
             if getattr(exc, "status_code", None) == 429:
                 failure_reason = "RATE_LIMIT"
@@ -460,6 +489,7 @@ class AnalysisOpenAiWorker:
             ) from exc
         except Exception as exc:
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(operation, "failed", self._elapsed_seconds(started_at))
             raise RetryableWorkerError(
                 f"OpenAI 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
                 failure_reason="INTERNAL_ERROR",
@@ -489,6 +519,9 @@ class AnalysisOpenAiWorker:
 
     def _elapsed_millis(self, started_at: float) -> int:
         return max(int((monotonic() - started_at) * 1000), 0)
+
+    def _elapsed_seconds(self, started_at: float) -> float:
+        return max(monotonic() - started_at, 0.0)
 
     def _extract_usage_fields(self, response: object) -> dict[str, int]:
         usage = getattr(response, "usage", None)

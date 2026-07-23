@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.config import settings
 from app.consumer import RabbitMqConsumer
@@ -33,3 +34,8 @@ def shutdown_event() -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name}
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
