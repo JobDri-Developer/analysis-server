@@ -7,7 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("APP_WORKER_INTERNAL_API_KEY", "test-internal-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
@@ -102,6 +102,7 @@ from app.config import settings
 from app.consumer import RabbitMqConsumer
 from app.logging_utils import JsonLogFormatter, WorkerContextFilter, bind_log_context
 from app.openai_client import AnalysisOpenAiWorker
+from app.processors import JobPostingTaskProcessor
 from app.recovery import PendingDeliveryStore, TerminalMessageStore
 from app.schemas import (
     AnalysisHighlightItem,
@@ -115,6 +116,14 @@ from app.schemas import (
     AnalysisWorkerContextResponse,
     AnalysisWorkerFailureRequest,
     AnalysisWorkerResultStoreRequest,
+    JobPostingClassificationCandidateResponse,
+    JobPostingClassificationResultResponse,
+    JobPostingExtractResponse,
+    JobPostingGenerateResponse,
+    JobPostingIngestResponse,
+    JobPostingIngestTaskMessage,
+    JobPostingWorkerFinalizeRequest,
+    JobPostingWorkerResultStoreRequest,
     NonRetryableWorkerError,
     PendingDeliveryEntry,
     RetryableWorkerError,
@@ -133,14 +142,17 @@ class FakeApiClient:
         self.store_analysis_calls: list[tuple[str, AnalysisWorkerResultStoreRequest]] = []
         self.complete_analysis_calls: list[tuple[str, AnalysisWorkerCompleteRequest]] = []
         self.fail_analysis_calls: list[tuple[str, AnalysisWorkerFailureRequest]] = []
+        self.analysis_result: AnalysisWorkerResultStoreRequest | None = None
 
     def store_analysis_result(self, task_id: str, request: AnalysisWorkerResultStoreRequest) -> None:
         self.store_analysis_calls.append((task_id, request))
+        self.analysis_result = request
 
     def complete_analysis_task(self, task_id: str, request: AnalysisWorkerCompleteRequest) -> None:
         self.complete_analysis_calls.append((task_id, request))
         if self.complete_should_fail:
             raise RetryableWorkerError("complete timeout")
+        self.analysis_task_status = "SUCCEEDED"
 
     def fail_analysis_task(self, task_id: str, request: AnalysisWorkerFailureRequest) -> None:
         self.fail_analysis_calls.append((task_id, request))
@@ -151,6 +163,45 @@ class FakeApiClient:
             status=self.analysis_task_status,
             failureReason="QUEUE_TIMEOUT" if self.analysis_task_status == "FAILED" else None,
         )
+
+    def get_analysis_result(self, task_id: str) -> AnalysisWorkerResultStoreRequest | None:
+        return self.analysis_result
+
+
+class FakeJobPostingApiClient:
+    def __init__(self) -> None:
+        self.store_job_posting_calls: list[tuple[str, JobPostingWorkerResultStoreRequest]] = []
+        self.finalize_calls: list[JobPostingWorkerFinalizeRequest] = []
+        self.job_posting_status: str | None = None
+        self.job_posting_result: JobPostingWorkerFinalizeRequest | None = None
+
+    def store_job_posting_result(self, task_id: str, request: JobPostingWorkerResultStoreRequest) -> None:
+        self.store_job_posting_calls.append((task_id, request))
+        self.job_posting_result = request.result
+
+    def finalize(self, request: JobPostingWorkerFinalizeRequest) -> None:
+        self.finalize_calls.append(request)
+        self.job_posting_status = "SUCCEEDED"
+
+    def get_job_posting_result(self, task_id: str) -> JobPostingWorkerFinalizeRequest | None:
+        return self.job_posting_result
+
+    def get_job_posting_task(self, task_id: str):
+        return types.SimpleNamespace(status=self.job_posting_status)
+
+
+class RetryableFinalizeApiClient(FakeJobPostingApiClient):
+    def finalize(self, request: JobPostingWorkerFinalizeRequest) -> None:
+        self.finalize_calls.append(request)
+        self.job_posting_status = "SUCCEEDED"
+        raise RetryableWorkerError("finalize timeout")
+
+
+class RetryableAnalysisStoreApiClient(FakeApiClient):
+    def store_analysis_result(self, task_id: str, request: AnalysisWorkerResultStoreRequest) -> None:
+        self.store_analysis_calls.append((task_id, request))
+        self.analysis_result = request
+        raise RetryableWorkerError("result timeout")
 
 
 class FakeResponse:
@@ -437,7 +488,28 @@ class RecoveryFlowTests(unittest.TestCase):
             },
         )
 
-    def test_store_analysis_result_treats_conflict_as_success(self) -> None:
+    def test_store_analysis_result_accepts_noop_success_response(self) -> None:
+        client = SpringWorkerApiClient()
+        client._session.post = lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "isSuccess": True,
+                "code": "ALREADY_COMPLETED",
+                "message": "no-op",
+                "result": None,
+                "error": None,
+            },
+        )
+
+        request = AnalysisWorkerResultStoreRequest(
+            userId=1,
+            mockApplyId=2,
+            llmResponse=self._build_llm_response(),
+        )
+
+        client.store_analysis_result("task-1", request)
+
+    def test_store_analysis_result_does_not_treat_conflict_as_success(self) -> None:
         client = SpringWorkerApiClient()
         client._session.post = lambda *args, **kwargs: FakeResponse(
             409,
@@ -456,7 +528,437 @@ class RecoveryFlowTests(unittest.TestCase):
             llmResponse=self._build_llm_response(),
         )
 
-        client.store_analysis_result("task-1", request)
+        with self.assertRaises(NonRetryableWorkerError):
+            client.store_analysis_result("task-1", request)
+
+    def test_legacy_job_posting_complete_accepts_noop_success_response(self) -> None:
+        client = SpringWorkerApiClient()
+        client._session.post = lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "isSuccess": True,
+                "code": "ALREADY_COMPLETED",
+                "message": "no-op",
+                "result": None,
+                "error": None,
+            },
+        )
+
+        result = client.complete_task(
+            "task-1",
+            JobPostingIngestResponse(
+                savedToDatabase=False,
+                message="legacy compatibility",
+                extracted=JobPostingExtractResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    rawText="raw",
+                    confidence=0.6,
+                ),
+                candidates=[
+                    JobPostingClassificationCandidateResponse(
+                        detailClassificationId=1,
+                        detailClassificationName="Backend",
+                        middleClassificationName="Server",
+                        bigClassificationName="Engineering",
+                        score=0.6,
+                    )
+                ],
+                classification=JobPostingClassificationResultResponse(
+                    detailClassificationId=1,
+                    detailClassificationName="Backend",
+                    middleClassificationName="Server",
+                    bigClassificationName="Engineering",
+                    confidence=0.6,
+                ),
+                generated=None,
+                saved=None,
+            ),
+        )
+
+        self.assertIsNone(result)
+
+    def test_job_posting_result_and_finalize_accept_repeated_noop_success(self) -> None:
+        client = SpringWorkerApiClient()
+        client._session.post = lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "isSuccess": True,
+                "code": "ALREADY_COMPLETED",
+                "message": "no-op",
+                "result": None,
+                "error": None,
+            },
+        )
+        finalize_request = JobPostingWorkerFinalizeRequest(
+            taskId="task-1",
+            userId=1,
+            extracted=JobPostingExtractResponse(
+                companyName="JobDri",
+                jobTitle="Backend Engineer",
+                task="Build APIs",
+                requirements="Python",
+                preferredQualifications="Testing",
+                rawText="raw",
+                confidence=0.6,
+            ),
+            candidates=[
+                JobPostingClassificationCandidateResponse(
+                    detailClassificationId=1,
+                    detailClassificationName="Backend",
+                    middleClassificationName="Server",
+                    bigClassificationName="Engineering",
+                    score=0.6,
+                )
+            ],
+            classification=JobPostingClassificationResultResponse(
+                detailClassificationId=1,
+                detailClassificationName="Backend",
+                middleClassificationName="Server",
+                bigClassificationName="Engineering",
+                confidence=0.6,
+            ),
+            generated=JobPostingGenerateResponse(
+                companyName="JobDri",
+                jobTitle="Backend Engineer",
+                task="Build APIs",
+                requirements="Python",
+                preferredQualifications="Testing",
+                summary="no-op finalize payload",
+            ),
+        )
+
+        client.store_job_posting_result(
+            "task-1",
+            JobPostingWorkerResultStoreRequest(userId=1, result=finalize_request),
+        )
+        client.store_job_posting_result(
+            "task-1",
+            JobPostingWorkerResultStoreRequest(userId=1, result=finalize_request),
+        )
+        client.finalize(finalize_request)
+        client.finalize(finalize_request)
+
+    def test_pending_job_posting_finalize_delivery_treats_noop_success_as_delivered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = FakeJobPostingApiClient()
+            store = PendingDeliveryStore(temp_dir)
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                recovery_store=store,
+                sleep_fn=lambda _: None,
+            )
+            message = JobPostingIngestTaskMessage(
+                messageId="m-job-1",
+                requestId="req-job-1",
+                taskType="JOB_POSTING_INGEST",
+                taskId="task-job-1",
+                userId=1,
+                rawText="raw",
+                retryCount=0,
+                maxRetryCount=3,
+                submittedAt="2026-07-19T00:00:00Z",
+            )
+            finalize_request = JobPostingWorkerFinalizeRequest(
+                taskId=message.taskId,
+                userId=message.userId,
+                extracted=JobPostingExtractResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    rawText="raw",
+                    confidence=0.6,
+                ),
+                candidates=[
+                    JobPostingClassificationCandidateResponse(
+                        detailClassificationId=1,
+                        detailClassificationName="Backend",
+                        middleClassificationName="Server",
+                        bigClassificationName="Engineering",
+                        score=0.6,
+                    )
+                ],
+                classification=JobPostingClassificationResultResponse(
+                    detailClassificationId=1,
+                    detailClassificationName="Backend",
+                    middleClassificationName="Server",
+                    bigClassificationName="Engineering",
+                    confidence=0.6,
+                ),
+                generated=JobPostingGenerateResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    summary="no-op finalize payload",
+                ),
+            )
+
+            consumer._store_job_posting_result(message, finalize_request)
+            pending_entry = consumer._enqueue_pending_delivery(
+                message=message,
+                delivery_kind="JOB_POSTING_FINALIZE",
+                delivery_path="/api/internal/worker/job-postings/ingest/finalize",
+                payload=finalize_request.model_dump(mode="json"),
+                retry_count=message.retryCount,
+            )
+
+            with patch.object(settings, "worker_api_retry_max_attempts", 1):
+                delivered = consumer._deliver_pending_entry(
+                    pending_entry,
+                    retry_count=message.retryCount,
+                    replayed=True,
+                )
+
+            self.assertTrue(delivered)
+            self.assertEqual(len(api_client.store_job_posting_calls), 1)
+            self.assertEqual(len(api_client.finalize_calls), 1)
+            self.assertEqual(store.list_entries(), [])
+
+    def test_finalize_timeout_is_resolved_by_terminal_status_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = RetryableFinalizeApiClient()
+            store = PendingDeliveryStore(temp_dir)
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                recovery_store=store,
+                sleep_fn=lambda _: None,
+            )
+            message = JobPostingIngestTaskMessage(
+                messageId="m-job-2",
+                requestId="req-job-2",
+                taskType="JOB_POSTING_INGEST",
+                taskId="task-job-2",
+                userId=1,
+                rawText="raw",
+                retryCount=0,
+                maxRetryCount=3,
+                submittedAt="2026-07-19T00:00:00Z",
+            )
+            finalize_request = JobPostingWorkerFinalizeRequest(
+                taskId=message.taskId,
+                userId=message.userId,
+                extracted=JobPostingExtractResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    rawText="raw",
+                    confidence=0.6,
+                ),
+                candidates=[
+                    JobPostingClassificationCandidateResponse(
+                        detailClassificationId=1,
+                        detailClassificationName="Backend",
+                        middleClassificationName="Server",
+                        bigClassificationName="Engineering",
+                        score=0.6,
+                    )
+                ],
+                classification=JobPostingClassificationResultResponse(
+                    detailClassificationId=1,
+                    detailClassificationName="Backend",
+                    middleClassificationName="Server",
+                    bigClassificationName="Engineering",
+                    confidence=0.6,
+                ),
+                generated=JobPostingGenerateResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    summary="retry-safe finalize payload",
+                ),
+            )
+            pending_entry = consumer._enqueue_pending_delivery(
+                message=message,
+                delivery_kind="JOB_POSTING_FINALIZE",
+                delivery_path="/api/internal/worker/job-postings/ingest/finalize",
+                payload=finalize_request.model_dump(mode="json"),
+                retry_count=message.retryCount,
+            )
+
+            delivered = consumer._deliver_pending_entry(
+                pending_entry,
+                retry_count=message.retryCount,
+                replayed=True,
+            )
+
+            self.assertTrue(delivered)
+            self.assertEqual(len(api_client.store_job_posting_calls), 1)
+            self.assertEqual(len(api_client.finalize_calls), 1)
+            self.assertEqual(store.list_entries(), [])
+
+    def test_low_confidence_job_posting_uses_result_then_finalize_instead_of_complete(self) -> None:
+        api_client = MagicMock()
+        api_client.get_context.return_value = types.SimpleNamespace(imageUrl="https://example.com/image.png")
+        api_client.get_candidates.return_value = [
+            JobPostingClassificationCandidateResponse(
+                detailClassificationId=1,
+                detailClassificationName="Backend",
+                middleClassificationName="Server",
+                bigClassificationName="Engineering",
+                score=0.4,
+            )
+        ]
+        openai_worker = MagicMock()
+        openai_worker.extract.return_value = JobPostingExtractResponse(
+            companyName="JobDri",
+            jobTitle="Backend Engineer",
+            task="Build APIs",
+            requirements="Python",
+            preferredQualifications="Testing",
+            rawText="raw",
+            confidence=0.8,
+        )
+        openai_worker.classify.return_value = JobPostingClassificationResultResponse(
+            detailClassificationId=1,
+            detailClassificationName="Backend",
+            middleClassificationName="Server",
+            bigClassificationName="Engineering",
+            confidence=0.4,
+        )
+        delivery_service = MagicMock()
+        delivery_service.resume_job_posting_without_llm.return_value = False
+        delivery_service.enqueue_pending_delivery.return_value = PendingDeliveryEntry(
+            taskId="task-job-1",
+            requestId="req-job-1",
+            messageId="m-job-1",
+            taskType="JOB_POSTING_INGEST",
+            retryCount=0,
+            deliveryKind="JOB_POSTING_FINALIZE",
+            deliveryPath="/api/internal/worker/job-postings/ingest/finalize",
+            payload={},
+            storedAt="2026-07-19T00:00:00+00:00",
+        )
+        delivery_service.deliver_pending_entry.return_value = True
+        processor = JobPostingTaskProcessor(
+            api_client=api_client,
+            openai_worker=openai_worker,
+            delivery_service=delivery_service,
+            worker_id="worker-1",
+        )
+        message = JobPostingIngestTaskMessage(
+            messageId="m-job-1",
+            requestId="req-job-1",
+            taskType="JOB_POSTING_INGEST",
+            taskId="task-job-1",
+            userId=1,
+            rawText="raw",
+            retryCount=0,
+            maxRetryCount=3,
+            submittedAt="2026-07-19T00:00:00Z",
+        )
+
+        processor.process(message)
+
+        delivery_service.store_job_posting_result.assert_called_once()
+        delivery_service.enqueue_pending_delivery.assert_called_once()
+        delivery_service.deliver_pending_entry.assert_called_once()
+        delivery_service.complete_low_confidence_job_posting.assert_not_called()
+        openai_worker.generate.assert_not_called()
+
+    def test_analysis_result_timeout_reuses_stored_result_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = RetryableAnalysisStoreApiClient()
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=object(),  # type: ignore[arg-type]
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                recovery_store=PendingDeliveryStore(temp_dir),
+                sleep_fn=lambda _: None,
+            )
+            message = self._build_message()
+            llm_response = self._build_llm_response()
+
+            consumer._store_analysis_result(message, llm_response)
+
+            self.assertEqual(len(api_client.store_analysis_calls), 1)
+            self.assertIsNotNone(api_client.get_analysis_result(message.taskId))
+
+    def test_job_posting_pending_delivery_is_reused_before_llm_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_client = FakeJobPostingApiClient()
+            store = PendingDeliveryStore(temp_dir)
+            consumer = RabbitMqConsumer(
+                api_client=api_client,
+                openai_worker=MagicMock(),
+                analysis_openai_worker=object(),  # type: ignore[arg-type]
+                recovery_store=store,
+                sleep_fn=lambda _: None,
+            )
+            message = JobPostingIngestTaskMessage(
+                messageId="m-job-3",
+                requestId="req-job-3",
+                taskType="JOB_POSTING_INGEST",
+                taskId="task-job-3",
+                userId=1,
+                rawText="raw",
+                retryCount=0,
+                maxRetryCount=3,
+                submittedAt="2026-07-19T00:00:00Z",
+            )
+            finalize_request = JobPostingWorkerFinalizeRequest(
+                taskId=message.taskId,
+                userId=message.userId,
+                extracted=JobPostingExtractResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    rawText="raw",
+                    confidence=0.7,
+                ),
+                candidates=[
+                    JobPostingClassificationCandidateResponse(
+                        detailClassificationId=1,
+                        detailClassificationName="Backend",
+                        middleClassificationName="Server",
+                        bigClassificationName="Engineering",
+                        score=0.7,
+                    )
+                ],
+                classification=JobPostingClassificationResultResponse(
+                    detailClassificationId=1,
+                    detailClassificationName="Backend",
+                    middleClassificationName="Server",
+                    bigClassificationName="Engineering",
+                    confidence=0.7,
+                ),
+                generated=JobPostingGenerateResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    summary="spooled finalize payload",
+                ),
+            )
+            consumer._enqueue_pending_delivery(
+                message=message,
+                delivery_kind="JOB_POSTING_FINALIZE",
+                delivery_path="/api/internal/worker/job-postings/ingest/finalize",
+                payload=finalize_request.model_dump(mode="json"),
+                retry_count=message.retryCount,
+            )
+
+            consumer._process_job_posting_task(message)
+
+            consumer._openai_worker.extract.assert_not_called()
+            self.assertEqual(len(api_client.finalize_calls), 1)
 
     def test_analysis_task_message_accepts_epoch_submitted_at(self) -> None:
         message = AnalysisTaskMessage.model_validate(
@@ -525,7 +1027,7 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIsNone(log_record.messageId)
         self.assertIsNone(log_record.workerId)
         self.assertIsNone(log_record.retryCount)
-        self.assertEqual(log_record.logType, "application")
+        self.assertEqual(log_record.logType, settings.worker_log_type)
 
     def test_json_log_formatter_does_not_mask_token_usage_metrics(self) -> None:
         log_record = logging.LogRecord(
