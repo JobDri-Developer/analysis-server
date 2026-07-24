@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import types
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY
 
 os.environ.setdefault("APP_WORKER_INTERNAL_API_KEY", "test-internal-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+from app.api_client import SpringWorkerApiClient
 from app.consumer import RabbitMqConsumer
 from app.main import metrics
-from app.metrics import DURATION_BUCKETS, increment_llm_request_error, observe_internal_api
+from app.metrics import (
+    DURATION_BUCKETS,
+    increment_llm_request_error,
+    observe_internal_api,
+    set_task_concurrency_limit,
+)
 from app.openai_client import APIStatusError, AnalysisOpenAiWorker, JobPostingOpenAiWorker
 from app.schemas import (
     AnalysisTaskMessage,
@@ -139,6 +147,46 @@ class PrometheusMetricsTests(unittest.TestCase):
         self.assertEqual(api_after, api_before + 1.0)
         self.assertEqual(llm_after, llm_before + 1.0)
 
+    def test_context_and_callback_histograms_are_recorded_with_internal_api_metric(self) -> None:
+        context_labels = {
+            "task_type": "analysis",
+            "endpoint": "analysis_context",
+            "outcome": "succeeded",
+        }
+        callback_labels = {
+            "task_type": "jobposting",
+            "endpoint": "job_posting_finalize",
+            "outcome": "failed",
+        }
+        context_before = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+        callback_before = _sample_value("worker_callback_duration_seconds_count", callback_labels)
+
+        observe_internal_api("ANALYSIS", "analysis_context", "POST", "succeeded", 0.05)
+        observe_internal_api("JOB_POSTING_INGEST", "job_posting_finalize", "POST", "failed", 0.15)
+
+        context_after = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+        callback_after = _sample_value("worker_callback_duration_seconds_count", callback_labels)
+
+        self.assertEqual(context_after, context_before + 1.0)
+        self.assertEqual(callback_after, callback_before + 1.0)
+
+    def test_concurrency_limit_gauge_tracks_task_type(self) -> None:
+        analysis_labels = {"task_type": "analysis"}
+        jobposting_labels = {"task_type": "jobposting"}
+        analysis_before = _sample_value("worker_task_concurrency_limit", analysis_labels)
+        jobposting_before = _sample_value("worker_task_concurrency_limit", jobposting_labels)
+
+        set_task_concurrency_limit("ANALYSIS", 3)
+        set_task_concurrency_limit("JOB_POSTING_INGEST", 5)
+
+        analysis_after = _sample_value("worker_task_concurrency_limit", analysis_labels)
+        jobposting_after = _sample_value("worker_task_concurrency_limit", jobposting_labels)
+
+        self.assertNotEqual(analysis_after, analysis_before)
+        self.assertNotEqual(jobposting_after, jobposting_before)
+        self.assertEqual(analysis_after, 3.0)
+        self.assertEqual(jobposting_after, 5.0)
+
     def test_duration_buckets_extend_beyond_observed_queue_wait_ceiling(self) -> None:
         self.assertGreater(max(DURATION_BUCKETS), 300.0)
 
@@ -181,6 +229,60 @@ class PrometheusMetricsTests(unittest.TestCase):
                 confidence=0.9,
             ),
             candidates,
+        )
+
+        fallback_after = _sample_value("llm_request_duration_seconds_count", fallback_labels)
+        error_after = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        self.assertEqual(result.detailClassificationId, 1)
+        self.assertEqual(fallback_after, fallback_before + 1.0)
+        self.assertEqual(error_after, error_before + 1.0)
+
+    def test_job_posting_classify_async_fallback_records_fallback_llm_outcome(self) -> None:
+        worker = JobPostingOpenAiWorker.__new__(JobPostingOpenAiWorker)
+        worker._task_type = "JOB_POSTING_INGEST"
+        worker._model = "test-model"
+        worker._async_client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(
+                create=AsyncMock(return_value=types.SimpleNamespace(output_text='{"reason":"bad"}'))
+            )
+        )
+
+        candidates = [
+            JobPostingClassificationCandidateResponse(
+                detailClassificationId=1,
+                detailClassificationName="Backend",
+                middleClassificationName="Server",
+                bigClassificationName="Engineering",
+                score=0.9,
+            )
+        ]
+        fallback_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "outcome": "fallback",
+        }
+        error_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "error_type": "validation_error",
+        }
+        fallback_before = _sample_value("llm_request_duration_seconds_count", fallback_labels)
+        error_before = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        result = asyncio.run(
+            worker.classify_async(
+                JobPostingExtractResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    rawText="raw",
+                    confidence=0.9,
+                ),
+                candidates,
+            )
         )
 
         fallback_after = _sample_value("llm_request_duration_seconds_count", fallback_labels)
@@ -361,6 +463,48 @@ class PrometheusMetricsTests(unittest.TestCase):
         non_retryable_mock.assert_called_once()
         retry_mock.assert_not_called()
         self.assertEqual(non_retryable_mock.call_args.args[-1].failure_reason, "VALIDATION_ERROR")
+
+    def test_async_internal_api_context_request_records_context_histogram(self) -> None:
+        client = SpringWorkerApiClient()
+        response = httpx.Response(
+            200,
+            json={
+                "isSuccess": True,
+                "code": "OK",
+                "message": "ok",
+                "result": {
+                    "imageUrl": "https://example.com/image.png",
+                },
+                "error": None,
+            },
+            request=httpx.Request("POST", "http://testserver/api/internal/worker/job-postings/ingest/context"),
+        )
+        api_labels = {
+            "task_type": "jobposting",
+            "endpoint": "job_posting_context",
+            "method": "POST",
+            "outcome": "succeeded",
+        }
+        context_labels = {
+            "task_type": "jobposting",
+            "endpoint": "job_posting_context",
+            "outcome": "succeeded",
+        }
+        api_before = _sample_value("worker_internal_api_duration_seconds_count", api_labels)
+        context_before = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+
+        try:
+            with patch.object(client._async_client, "post", new=AsyncMock(return_value=response)):
+                result = asyncio.run(client.get_context_async(1, "images/1.png"))
+        finally:
+            asyncio.run(client.aclose())
+
+        api_after = _sample_value("worker_internal_api_duration_seconds_count", api_labels)
+        context_after = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+
+        self.assertEqual(result.imageUrl, "https://example.com/image.png")
+        self.assertEqual(api_after, api_before + 1.0)
+        self.assertEqual(context_after, context_before + 1.0)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ from uuid import uuid4
 import pika
 
 from app.api_client import SpringWorkerApiClient
+from app.async_runtime import AsyncConsumerRuntime
 from app.concurrency import TaskTypeConcurrencyLimiter, TaskTypeConcurrencyConfig
 from app.config import settings
 from app.delivery import WorkerDeliveryService
@@ -24,6 +26,7 @@ from app.metrics import (
     increment_task_retry,
     observe_task_processing,
     observe_task_queue_wait,
+    set_task_concurrency_limit,
 )
 from app.openai_client import AnalysisOpenAiWorker, JobPostingOpenAiWorker
 from app.processors import AnalysisTaskProcessor, JobPostingTaskProcessor
@@ -60,6 +63,8 @@ TERMINAL_TASK_STATUSES = {"FAILED", "SUCCEEDED", "SUCCESS", "COMPLETED", "COMPLE
 
 
 class RabbitMqConsumer:
+    TERMINAL_TASK_STATUSES = TERMINAL_TASK_STATUSES
+
     def __init__(
         self,
         *,
@@ -90,6 +95,7 @@ class RabbitMqConsumer:
             api_client=self._api_client,
             recovery_store=self._recovery_store,
             run_api_call_with_retry=self._run_api_call_with_retry,
+            run_api_call_with_retry_async=self._run_api_call_with_retry_async,
             generate_request_id=self._generate_request_id,
             utcnow=self._utcnow,
             entry_log_context_factory=self._entry_log_context,
@@ -109,37 +115,16 @@ class RabbitMqConsumer:
         self._concurrency_limiter = concurrency_limiter or TaskTypeConcurrencyLimiter(
             TaskTypeConcurrencyConfig.from_settings(settings)
         )
+        self._async_runtime = AsyncConsumerRuntime(self)
+        set_task_concurrency_limit("ANALYSIS", self._concurrency_limiter.limit_for("ANALYSIS"))
+        set_task_concurrency_limit("JOB_POSTING_INGEST", self._concurrency_limiter.limit_for("JOB_POSTING_INGEST"))
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(target=self._run, name="rabbitmq-consumer", daemon=True)
-        self._thread.start()
-        self._recovery_thread = threading.Thread(target=self._recovery_loop, name="delivery-recovery", daemon=True)
-        self._recovery_thread.start()
+        self._async_runtime.start()
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._channel and self._channel.is_open:
-            with bind_log_context(workerId=self._worker_id):
-                try:
-                    self._channel.stop_consuming()
-                except Exception:
-                    log_exception(
-                        logger,
-                        "worker.consumer.stop_failed",
-                        "RabbitMQ consuming stop 중 오류가 발생했지만 종료를 계속합니다.",
-                    )
-        if self._connection and self._connection.is_open:
-            with bind_log_context(workerId=self._worker_id):
-                try:
-                    self._connection.close()
-                except Exception:
-                    log_exception(
-                        logger,
-                        "worker.consumer.connection_close_failed",
-                        "RabbitMQ connection close 중 오류가 발생했지만 종료를 계속합니다.",
-                    )
+        self._async_runtime.stop()
 
     def _run(self) -> None:
         credentials = pika.PlainCredentials(settings.rabbitmq_username, settings.rabbitmq_password)
@@ -516,6 +501,37 @@ class RabbitMqConsumer:
                 if attempt >= max_attempts:
                     raise
                 self._sleep_fn(delay_seconds)
+            except NonRetryableWorkerError:
+                raise
+
+    async def _run_api_call_with_retry_async(
+        self,
+        *,
+        operation_name: str,
+        task_id: str,
+        retry_count: int,
+        action: Callable[[], Any],
+        on_retryable_error: Callable[[int, str, str | None], None] | None = None,
+        replayed: bool = False,
+    ) -> Any:
+        max_attempts = max(settings.worker_api_retry_max_attempts, 1)
+        attempt = 0
+
+        while True:
+            attempt += 1
+            try:
+                return await action()
+            except RetryableWorkerError as exc:
+                next_attempt_at = None
+                delay_seconds = 0.0
+                if attempt < max_attempts:
+                    delay_seconds = self._compute_backoff_seconds(attempt)
+                    next_attempt_at = (self._utcnow() + timedelta(seconds=delay_seconds)).isoformat()
+                if on_retryable_error is not None:
+                    on_retryable_error(attempt, str(exc), next_attempt_at)
+                if attempt >= max_attempts:
+                    raise
+                await asyncio.sleep(delay_seconds)
             except NonRetryableWorkerError:
                 raise
 
@@ -1250,6 +1266,12 @@ class RabbitMqConsumer:
         if started_at is None:
             return None
         return max(int((monotonic() - started_at) * 1000), 0)
+
+    def _observe_processing_metric(self, task_type: str | None, outcome: str, processing_latency_ms: int) -> None:
+        observe_task_processing(task_type, outcome, processing_latency_ms / 1000)
+
+    def _now_monotonic(self) -> float:
+        return monotonic()
 
     def _utcnow(self) -> datetime:
         return datetime.now(timezone.utc)

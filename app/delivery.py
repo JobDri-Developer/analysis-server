@@ -30,6 +30,7 @@ class WorkerDeliveryService:
         api_client: SpringWorkerApiClient,
         recovery_store: PendingDeliveryStore,
         run_api_call_with_retry: Callable[..., Any],
+        run_api_call_with_retry_async: Callable[..., Any],
         generate_request_id: Callable[[], str],
         utcnow: Callable[[], datetime],
         entry_log_context_factory: Callable[[PendingDeliveryEntry], dict[str, str | int | None]],
@@ -37,6 +38,7 @@ class WorkerDeliveryService:
         self._api_client = api_client
         self._recovery_store = recovery_store
         self._run_api_call_with_retry = run_api_call_with_retry
+        self._run_api_call_with_retry_async = run_api_call_with_retry_async
         self._generate_request_id = generate_request_id
         self._utcnow = utcnow
         self._entry_log_context_factory = entry_log_context_factory
@@ -82,6 +84,51 @@ class WorkerDeliveryService:
             task_id=message.taskId,
             retry_count=message.retryCount,
             action=lambda: self._api_client.complete_task(message.taskId, result),
+        )
+        if response is None:
+            raise RetryableWorkerError("job posting complete 응답이 없습니다.")
+
+    async def store_job_posting_result_async(
+        self,
+        message: JobPostingIngestTaskMessage,
+        finalize_request: JobPostingWorkerFinalizeRequest,
+    ) -> None:
+        request = JobPostingWorkerResultStoreRequest(
+            userId=message.userId,
+            result=finalize_request,
+        )
+        log_info(logger, "worker.result.store.started", "job posting result 저장을 시작합니다.")
+        await self._run_api_call_with_retry_async(
+            operation_name="job posting result 저장",
+            task_id=message.taskId,
+            retry_count=message.retryCount,
+            action=lambda: self._api_client.store_job_posting_result_async(message.taskId, request),
+        )
+
+    async def store_analysis_result_async(self, message: AnalysisTaskMessage, llm_response) -> None:
+        request = AnalysisWorkerResultStoreRequest(
+            userId=message.userId,
+            mockApplyId=message.mockApplyId,
+            llmResponse=llm_response,
+        )
+        log_info(logger, "worker.result.store.started", "analysis result 저장을 시작합니다.")
+        await self._run_api_call_with_retry_async(
+            operation_name="analysis result 저장",
+            task_id=message.taskId,
+            retry_count=message.retryCount,
+            action=lambda: self._api_client.store_analysis_result_async(message.taskId, request),
+        )
+
+    async def complete_low_confidence_job_posting_async(
+        self,
+        message: JobPostingIngestTaskMessage,
+        result: JobPostingIngestResponse,
+    ) -> None:
+        response = await self._run_api_call_with_retry_async(
+            operation_name="job posting complete",
+            task_id=message.taskId,
+            retry_count=message.retryCount,
+            action=lambda: self._api_client.complete_task_async(message.taskId, result),
         )
         if response is None:
             raise RetryableWorkerError("job posting complete 응답이 없습니다.")
@@ -179,3 +226,65 @@ class WorkerDeliveryService:
                 replayed=replayed,
             )
             return True
+
+    async def deliver_pending_entry_async(
+        self,
+        entry: PendingDeliveryEntry,
+        *,
+        retry_count: int,
+        replayed: bool,
+    ) -> bool:
+        if not entry.requestId:
+            entry.requestId = self._generate_request_id()
+            self._recovery_store.upsert(entry)
+
+        with bind_log_context(**self._entry_log_context_factory(entry)):
+            log_info(
+                logger,
+                "worker.delivery.started",
+                "pending delivery 전달을 시작합니다.",
+                deliveryKind=entry.deliveryKind,
+                replayed=replayed,
+            )
+
+            def on_retryable_error(attempt: int, error_message: str, next_attempt_at: str | None) -> None:
+                entry.attemptCount = attempt
+                entry.lastError = error_message
+                entry.nextAttemptAt = next_attempt_at
+                self._recovery_store.upsert(entry)
+
+            try:
+                await self._run_api_call_with_retry_async(
+                    operation_name=f"{entry.deliveryKind} 전달",
+                    task_id=entry.taskId,
+                    retry_count=retry_count,
+                    action=lambda: self._deliver_entry_once_async(entry),
+                    on_retryable_error=on_retryable_error,
+                    replayed=replayed,
+                )
+            except RetryableWorkerError:
+                return False
+            except NonRetryableWorkerError:
+                self._recovery_store.delete(entry.taskId, entry.deliveryKind)
+                raise
+
+            self._recovery_store.delete(entry.taskId, entry.deliveryKind)
+            log_info(
+                logger,
+                "worker.recovery.replayed" if replayed else "worker.delivery.completed",
+                "pending delivery 전달이 완료되었습니다.",
+                deliveryKind=entry.deliveryKind,
+                replayed=replayed,
+            )
+            return True
+
+    async def _deliver_entry_once_async(self, entry: PendingDeliveryEntry) -> None:
+        if entry.deliveryKind == "ANALYSIS_COMPLETE":
+            request = AnalysisWorkerCompleteRequest.model_validate(entry.payload)
+            await self._api_client.complete_analysis_task_async(entry.taskId, request)
+            return
+        if entry.deliveryKind == "JOB_POSTING_FINALIZE":
+            request = JobPostingWorkerFinalizeRequest.model_validate(entry.payload)
+            await self._api_client.finalize_async(request)
+            return
+        raise NonRetryableWorkerError(f"지원하지 않는 deliveryKind입니다. deliveryKind={entry.deliveryKind}")
