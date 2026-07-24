@@ -23,70 +23,55 @@ _TASK_TYPE_LABELS = {
 _REASON_LABELS = {
     "RATE_LIMIT": "rate_limit",
     "QUEUE_TIMEOUT": "queue_timeout",
-    "OPENAI_TIMEOUT": "openai_timeout",
+    "OPENAI_TIMEOUT": "timeout",
     "VALIDATION_ERROR": "validation_error",
     "INTERNAL_ERROR": "internal_error",
 }
 
-worker_queue_wait_duration = Histogram(
-    "worker_queue_wait_duration",
-    "Time from message enqueue to worker processing start in seconds.",
+llm_request_duration_seconds = Histogram(
+    "llm_request_duration_seconds",
+    "Latency of OpenAI requests executed by the worker.",
+    labelnames=("task_type", "operation", "outcome"),
+    buckets=DURATION_BUCKETS,
+)
+
+worker_llm_request_errors_total = Counter(
+    "worker_llm_request_errors_total",
+    "Count of OpenAI request failures observed by the worker.",
+    labelnames=("task_type", "operation", "error_type"),
+)
+
+worker_internal_api_duration_seconds = Histogram(
+    "worker_internal_api_duration_seconds",
+    "Latency of Spring internal API calls made by the worker.",
+    labelnames=("task_type", "endpoint", "method", "outcome"),
+    buckets=DURATION_BUCKETS,
+)
+
+worker_task_processing_duration_seconds = Histogram(
+    "worker_task_processing_duration_seconds",
+    "End-to-end worker task processing time from processing start to terminal outcome.",
+    labelnames=("task_type", "outcome"),
+    buckets=DURATION_BUCKETS,
+)
+
+worker_task_queue_wait_duration_seconds = Histogram(
+    "worker_task_queue_wait_duration_seconds",
+    "Time a task spent waiting in the queue before worker processing started.",
     labelnames=("task_type",),
     buckets=DURATION_BUCKETS,
 )
 
-worker_processing_duration = Histogram(
-    "worker_processing_duration",
-    "Time from worker processing start to succeeded/failed/retry outcome in seconds.",
-    labelnames=("task_type", "outcome"),
-    buckets=DURATION_BUCKETS,
-)
-
-worker_context_fetch_duration = Histogram(
-    "worker_context_fetch_duration",
-    "Time spent fetching worker context from the Spring internal API in seconds.",
-    labelnames=("task_type", "outcome"),
-    buckets=DURATION_BUCKETS,
-)
-
-worker_callback_duration = Histogram(
-    "worker_callback_duration",
-    "Time spent reflecting worker completion/failure/retry callbacks to the Spring internal API in seconds.",
-    labelnames=("task_type", "outcome"),
-    buckets=DURATION_BUCKETS,
-)
-
-llm_request_duration = Histogram(
-    "llm_request_duration",
-    "Latency per OpenAI request in seconds.",
-    labelnames=("operation", "outcome"),
-    buckets=DURATION_BUCKETS,
-)
-
-worker_retry_count = Counter(
-    "worker_retry_count",
-    "Number of worker retry transitions.",
+worker_task_retry_count_total = Counter(
+    "worker_task_retry_count_total",
+    "Count of worker retry transitions.",
     labelnames=("task_type", "reason"),
 )
 
-worker_inflight_tasks = Gauge(
-    "worker_inflight_tasks",
-    "Current number of inflight worker tasks.",
+worker_task_inflight = Gauge(
+    "worker_task_inflight",
+    "Current number of worker tasks being processed.",
     labelnames=("task_type",),
-)
-
-retrieval_duration = Histogram(
-    "retrieval_duration",
-    "Time spent fetching downstream retrieval data needed by a worker task in seconds.",
-    labelnames=("task_type", "outcome"),
-    buckets=DURATION_BUCKETS,
-)
-
-result_store_duration = Histogram(
-    "result_store_duration",
-    "Time spent storing worker results to the Spring internal API in seconds.",
-    labelnames=("task_type", "outcome"),
-    buckets=DURATION_BUCKETS,
 )
 
 
@@ -100,62 +85,58 @@ def reason_label(reason: str | None) -> str:
     return _REASON_LABELS.get((reason or "").upper(), "unknown")
 
 
-def observe_queue_wait(task_type: str | None, seconds: float) -> None:
-    worker_queue_wait_duration.labels(task_type=task_type_label(task_type)).observe(max(seconds, 0.0))
+def error_type_label(error_type: str | None) -> str:
+    return _REASON_LABELS.get((error_type or "").upper(), "unknown")
 
 
-def observe_processing(task_type: str | None, outcome: str, seconds: float) -> None:
-    worker_processing_duration.labels(
+def observe_task_queue_wait(task_type: str | None, seconds: float) -> None:
+    worker_task_queue_wait_duration_seconds.labels(
+        task_type=task_type_label(task_type)
+    ).observe(max(seconds, 0.0))
+
+
+def observe_task_processing(task_type: str | None, outcome: str, seconds: float) -> None:
+    worker_task_processing_duration_seconds.labels(
         task_type=task_type_label(task_type),
         outcome=outcome,
     ).observe(max(seconds, 0.0))
 
 
-def observe_context_fetch(task_type: str | None, outcome: str, seconds: float) -> None:
-    worker_context_fetch_duration.labels(
-        task_type=task_type_label(task_type),
-        outcome=outcome,
-    ).observe(max(seconds, 0.0))
-
-
-def observe_callback(task_type: str | None, outcome: str, seconds: float) -> None:
-    worker_callback_duration.labels(
-        task_type=task_type_label(task_type),
-        outcome=outcome,
-    ).observe(max(seconds, 0.0))
-
-
-def observe_llm_request(operation: str, outcome: str, seconds: float) -> None:
-    llm_request_duration.labels(
-        operation=operation,
-        outcome=outcome,
-    ).observe(max(seconds, 0.0))
-
-
-def increment_retry(task_type: str | None, reason: str | None) -> None:
-    worker_retry_count.labels(
+def increment_task_retry(task_type: str | None, reason: str | None) -> None:
+    worker_task_retry_count_total.labels(
         task_type=task_type_label(task_type),
         reason=reason_label(reason),
     ).inc()
 
 
-def increment_inflight(task_type: str | None) -> None:
-    worker_inflight_tasks.labels(task_type=task_type_label(task_type)).inc()
+def increment_task_inflight(task_type: str | None) -> None:
+    worker_task_inflight.labels(task_type=task_type_label(task_type)).inc()
 
 
-def decrement_inflight(task_type: str | None) -> None:
-    worker_inflight_tasks.labels(task_type=task_type_label(task_type)).dec()
+def decrement_task_inflight(task_type: str | None) -> None:
+    worker_task_inflight.labels(task_type=task_type_label(task_type)).dec()
 
 
-def observe_retrieval(task_type: str | None, outcome: str, seconds: float) -> None:
-    retrieval_duration.labels(
+def observe_llm_request(task_type: str | None, operation: str, outcome: str, seconds: float) -> None:
+    llm_request_duration_seconds.labels(
         task_type=task_type_label(task_type),
+        operation=operation,
         outcome=outcome,
     ).observe(max(seconds, 0.0))
 
 
-def observe_result_store(task_type: str | None, outcome: str, seconds: float) -> None:
-    result_store_duration.labels(
+def increment_llm_request_error(task_type: str | None, operation: str, error_type: str | None) -> None:
+    worker_llm_request_errors_total.labels(
         task_type=task_type_label(task_type),
+        operation=operation,
+        error_type=error_type_label(error_type),
+    ).inc()
+
+
+def observe_internal_api(task_type: str | None, endpoint: str, method: str, outcome: str, seconds: float) -> None:
+    worker_internal_api_duration_seconds.labels(
+        task_type=task_type_label(task_type),
+        endpoint=endpoint,
+        method=method.upper(),
         outcome=outcome,
     ).observe(max(seconds, 0.0))
