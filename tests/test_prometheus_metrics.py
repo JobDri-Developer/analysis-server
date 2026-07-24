@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import types
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
@@ -15,7 +16,15 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 from app.consumer import RabbitMqConsumer
 from app.main import metrics
 from app.metrics import increment_llm_request_error, observe_internal_api
-from app.schemas import JobPostingIngestTaskMessage, RetryableWorkerError
+from app.openai_client import AnalysisOpenAiWorker, JobPostingOpenAiWorker
+from app.schemas import (
+    AnalysisWorkerContextResponse,
+    JobPostingClassificationCandidateResponse,
+    JobPostingExtractResponse,
+    JobPostingIngestTaskMessage,
+    NonRetryableWorkerError,
+    RetryableWorkerError,
+)
 
 
 def _sample_value(name: str, labels: dict[str, str]) -> float:
@@ -127,6 +136,99 @@ class PrometheusMetricsTests(unittest.TestCase):
 
         self.assertEqual(api_after, api_before + 1.0)
         self.assertEqual(llm_after, llm_before + 1.0)
+
+    def test_job_posting_classify_fallback_records_failed_llm_outcome(self) -> None:
+        worker = JobPostingOpenAiWorker.__new__(JobPostingOpenAiWorker)
+        worker._task_type = "JOB_POSTING_INGEST"
+        worker._model = "test-model"
+        worker._create_response = lambda **_kwargs: types.SimpleNamespace(output_text='{"reason":"bad"}')  # type: ignore[method-assign]
+
+        candidates = [
+            JobPostingClassificationCandidateResponse(
+                detailClassificationId=1,
+                detailClassificationName="Backend",
+                middleClassificationName="Server",
+                bigClassificationName="Engineering",
+                score=0.9,
+            )
+        ]
+        failed_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "outcome": "failed",
+        }
+        error_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "error_type": "validation_error",
+        }
+        failed_before = _sample_value("llm_request_duration_seconds_count", failed_labels)
+        error_before = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        result = worker.classify(
+            JobPostingExtractResponse(
+                companyName="JobDri",
+                jobTitle="Backend Engineer",
+                task="Build APIs",
+                requirements="Python",
+                preferredQualifications="Testing",
+                rawText="raw",
+                confidence=0.9,
+            ),
+            candidates,
+        )
+
+        failed_after = _sample_value("llm_request_duration_seconds_count", failed_labels)
+        error_after = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        self.assertEqual(result.detailClassificationId, 1)
+        self.assertEqual(failed_after, failed_before + 1.0)
+        self.assertEqual(error_after, error_before + 1.0)
+
+    def test_analysis_validation_error_is_non_retryable(self) -> None:
+        worker = AnalysisOpenAiWorker.__new__(AnalysisOpenAiWorker)
+        worker._task_type = "ANALYSIS"
+        worker._model = "test-model"
+        worker._client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=lambda **_kwargs: types.SimpleNamespace(output_text='{"jobFit": 1}'))
+        )
+
+        failed_labels = {
+            "task_type": "analysis",
+            "operation": "analysis-final",
+            "outcome": "failed",
+        }
+        error_labels = {
+            "task_type": "analysis",
+            "operation": "analysis-final",
+            "error_type": "validation_error",
+        }
+        failed_before = _sample_value("llm_request_duration_seconds_count", failed_labels)
+        error_before = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        with self.assertRaises(NonRetryableWorkerError) as cm:
+            worker.analyze(
+                AnalysisWorkerContextResponse(
+                    userId=1,
+                    mockApplyId=1,
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    bigClassificationName="Engineering",
+                    middleClassificationName="Server",
+                    detailClassificationName="Backend",
+                    questions=[],
+                )
+            )
+
+        failed_after = _sample_value("llm_request_duration_seconds_count", failed_labels)
+        error_after = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        self.assertEqual(cm.exception.failure_reason, "VALIDATION_ERROR")
+        self.assertEqual(failed_after, failed_before + 1.0)
+        self.assertEqual(error_after, error_before + 1.0)
 
 
 if __name__ == "__main__":

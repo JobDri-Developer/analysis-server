@@ -112,7 +112,7 @@ class JobPostingOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = JobPostingClassificationResultResponse.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
             increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
             log_warning(
                 logger,
@@ -171,7 +171,7 @@ class JobPostingOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = JobPostingGenerateResponse.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
             increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
             log_warning(
                 logger,
@@ -474,7 +474,7 @@ class AnalysisOpenAiWorker:
                 failure_reason="OPENAI_TIMEOUT",
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
-        except (BadRequestError, json.JSONDecodeError, ValueError) as exc:
+        except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
             observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
