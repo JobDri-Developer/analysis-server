@@ -43,7 +43,13 @@ class ObservabilityLoggingTests(unittest.TestCase):
             "app.api_client.monotonic",
             side_effect=[100.0, 100.125],
         ):
-            client._post("/api/internal/test", {"hello": "world"})
+            client._post(
+                "/api/internal/test",
+                {"hello": "world"},
+                task_type="ANALYSIS",
+                endpoint="analysis_context",
+                method="POST",
+            )
 
         response_log = next(
             call
@@ -70,7 +76,13 @@ class ObservabilityLoggingTests(unittest.TestCase):
         with patch("app.api_client.ensure_request_id", return_value="req-123"), patch(
             "app.api_client.log_info"
         ) as log_info_mock:
-            client._post("/api/internal/test", {"hello": "world"})
+            client._post(
+                "/api/internal/test",
+                {"hello": "world"},
+                task_type="ANALYSIS",
+                endpoint="analysis_context",
+                method="POST",
+            )
 
         request_log = next(
             call for call in log_info_mock.call_args_list if len(call.args) > 1 and call.args[1] == "worker.api.request"
@@ -87,7 +99,12 @@ class ObservabilityLoggingTests(unittest.TestCase):
             side_effect=[200.0, 200.125],
         ):
             with self.assertRaises(RetryableWorkerError):
-                client._get("/api/internal/test")
+                client._get(
+                    "/api/internal/test",
+                    task_type="ANALYSIS",
+                    endpoint="analysis_task_status",
+                    method="GET",
+                )
 
         failure_log = log_warning_mock.call_args
         self.assertEqual(failure_log.args[1], "worker.api.failed")

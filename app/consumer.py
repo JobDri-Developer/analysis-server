@@ -17,15 +17,11 @@ from app.api_client import SpringWorkerApiClient
 from app.config import settings
 from app.logging_utils import bind_log_context, log_exception, log_info, log_warning
 from app.metrics import (
-    decrement_inflight,
-    increment_inflight,
-    increment_retry,
-    observe_callback,
-    observe_context_fetch,
-    observe_processing,
-    observe_queue_wait,
-    observe_result_store,
-    observe_retrieval,
+    decrement_task_inflight,
+    increment_task_inflight,
+    increment_task_retry,
+    observe_task_processing,
+    observe_task_queue_wait,
 )
 from app.openai_client import AnalysisOpenAiWorker, JobPostingOpenAiWorker
 from app.recovery import PendingDeliveryStore, TerminalMessageStore
@@ -223,7 +219,7 @@ class RabbitMqConsumer:
                 else:
                     self._process_job_posting_task(message)
                 processing_latency_ms = self._elapsed_millis(processing_started_at) or 0
-                observe_processing(message.taskType, "succeeded", processing_latency_ms / 1000)
+                observe_task_processing(message.taskType, "succeeded", processing_latency_ms / 1000)
                 log_info(
                     logger,
                     "queue.consume.completed",
@@ -246,7 +242,7 @@ class RabbitMqConsumer:
                     taskProcessingLatencyMs=processing_latency_ms,
                 )
                 outcome = self._handle_non_retryable(channel, method.delivery_tag, message, body, properties, exc)
-                observe_processing(message.taskType, outcome, processing_latency_ms / 1000)
+                observe_task_processing(message.taskType, outcome, processing_latency_ms / 1000)
         except RetryableWorkerError as exc:
             with bind_log_context(**self._message_log_context(message, queue_latency_millis=exc.queue_latency_millis)):
                 processing_latency_ms = self._elapsed_millis(processing_started_at) or 0
@@ -261,7 +257,7 @@ class RabbitMqConsumer:
                     taskProcessingLatencyMs=processing_latency_ms,
                 )
                 outcome = self._retry_or_fail(channel, method.delivery_tag, properties, message, body, exc)
-                observe_processing(message.taskType, outcome, processing_latency_ms / 1000)
+                observe_task_processing(message.taskType, outcome, processing_latency_ms / 1000)
         except Exception as exc:
             with bind_log_context(**self._message_log_context(message)):
                 processing_latency_ms = self._elapsed_millis(processing_started_at) or 0
@@ -276,7 +272,7 @@ class RabbitMqConsumer:
                 )
                 retryable_exc = RetryableWorkerError(str(exc), failure_reason="INTERNAL_ERROR")
                 outcome = self._retry_or_fail(channel, method.delivery_tag, properties, message, body, retryable_exc)
-                observe_processing(message.taskType, outcome, processing_latency_ms / 1000)
+                observe_task_processing(message.taskType, outcome, processing_latency_ms / 1000)
         finally:
             self._release_inflight(message.taskId)
 
@@ -310,7 +306,7 @@ class RabbitMqConsumer:
         task_started_at = monotonic()
         queue_latency_millis = self._safe_compute_queue_latency(message.submittedAt)
         if queue_latency_millis is not None:
-            observe_queue_wait(message.taskType, queue_latency_millis / 1000)
+            observe_task_queue_wait(message.taskType, queue_latency_millis / 1000)
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
             log_info(
                 logger,
@@ -330,10 +326,8 @@ class RabbitMqConsumer:
             try:
                 context = self._api_client.get_context(message.userId, message.imageObjectKey)
             except Exception:
-                observe_context_fetch(message.taskType, "failed", self._elapsed_seconds(context_started_at))
                 raise
             context_fetch_latency_ms = self._elapsed_millis(context_started_at)
-            observe_context_fetch(message.taskType, "succeeded", self._elapsed_seconds(context_started_at))
             log_info(
                 logger,
                 "worker.context.fetch.completed",
@@ -347,10 +341,8 @@ class RabbitMqConsumer:
             try:
                 candidates = self._api_client.get_candidates(extracted)
             except Exception:
-                observe_retrieval(message.taskType, "failed", self._elapsed_seconds(candidates_started_at))
                 raise
             candidate_fetch_latency_ms = self._elapsed_millis(candidates_started_at)
-            observe_retrieval(message.taskType, "succeeded", self._elapsed_seconds(candidates_started_at))
             log_info(
                 logger,
                 "worker.candidates.fetch.completed",
@@ -421,10 +413,8 @@ class RabbitMqConsumer:
             try:
                 self._store_job_posting_result(message, finalize_request)
             except Exception:
-                observe_result_store(message.taskType, "failed", self._elapsed_seconds(result_store_started_at))
                 raise
             result_store_latency_ms = self._elapsed_millis(result_store_started_at)
-            observe_result_store(message.taskType, "succeeded", self._elapsed_seconds(result_store_started_at))
             log_info(
                 logger,
                 "worker.result.store.completed",
@@ -470,7 +460,7 @@ class RabbitMqConsumer:
     def _process_analysis_task(self, message: AnalysisTaskMessage) -> None:
         task_started_at = monotonic()
         queue_latency_millis = self._compute_queue_latency_millis(message.submittedAt)
-        observe_queue_wait(message.taskType, queue_latency_millis / 1000)
+        observe_task_queue_wait(message.taskType, queue_latency_millis / 1000)
         self._ensure_analysis_not_timed_out(queue_latency_millis)
 
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
@@ -497,10 +487,8 @@ class RabbitMqConsumer:
                     )
                 )
             except Exception:
-                observe_context_fetch(message.taskType, "failed", self._elapsed_seconds(context_started_at))
                 raise
             context_fetch_latency_ms = self._elapsed_millis(context_started_at)
-            observe_context_fetch(message.taskType, "succeeded", self._elapsed_seconds(context_started_at))
             log_info(
                 logger,
                 "worker.context.fetch.completed",
@@ -540,10 +528,8 @@ class RabbitMqConsumer:
             try:
                 self._store_analysis_result(message, llm_response)
             except Exception:
-                observe_result_store(message.taskType, "failed", self._elapsed_seconds(result_store_started_at))
                 raise
             result_store_latency_ms = self._elapsed_millis(result_store_started_at)
-            observe_result_store(message.taskType, "succeeded", self._elapsed_seconds(result_store_started_at))
             log_info(
                 logger,
                 "worker.result.store.completed",
@@ -655,15 +641,11 @@ class RabbitMqConsumer:
         message: JobPostingIngestTaskMessage,
         result: JobPostingIngestResponse,
     ) -> None:
-        response = self._observe_callback_operation(
-            message.taskType,
-            "succeeded",
-            lambda: self._run_api_call_with_retry(
-                operation_name="job posting complete",
-                task_id=message.taskId,
-                retry_count=message.retryCount,
-                action=lambda: self._api_client.complete_task(message.taskId, result),
-            ),
+        response = self._run_api_call_with_retry(
+            operation_name="job posting complete",
+            task_id=message.taskId,
+            retry_count=message.retryCount,
+            action=lambda: self._api_client.complete_task(message.taskId, result),
         )
         if response is None:
             raise RetryableWorkerError("job posting complete 응답이 없습니다.")
@@ -737,17 +719,13 @@ class RabbitMqConsumer:
                 self._recovery_store.upsert(entry)
 
             try:
-                self._observe_callback_operation(
-                    entry.taskType,
-                    "succeeded",
-                    lambda: self._run_api_call_with_retry(
-                        operation_name=f"{entry.deliveryKind} 전달",
-                        task_id=entry.taskId,
-                        retry_count=retry_count,
-                        action=action,
-                        on_retryable_error=on_retryable_error,
-                        replayed=replayed,
-                    ),
+                self._run_api_call_with_retry(
+                    operation_name=f"{entry.deliveryKind} 전달",
+                    task_id=entry.taskId,
+                    retry_count=retry_count,
+                    action=action,
+                    on_retryable_error=on_retryable_error,
+                    replayed=replayed,
                 )
             except RetryableWorkerError:
                 return False
@@ -979,10 +957,10 @@ class RabbitMqConsumer:
             )
             if published:
                 self._ack_message(channel, delivery_tag, reason="republished-for-retry", message=message)
-                increment_retry(message.taskType, error.failure_reason)
+                increment_task_retry(message.taskType, error.failure_reason)
                 return "retry"
             self._nack_message(channel, delivery_tag, requeue=True, reason="retry-republish-failed", message=message)
-            increment_retry(message.taskType, error.failure_reason)
+            increment_task_retry(message.taskType, error.failure_reason)
             return "retry"
 
     def _handle_non_retryable(
@@ -1246,18 +1224,14 @@ class RabbitMqConsumer:
                     failureReason=failure_reason,
                     errorCode=failure_reason,
                 )
-                self._observe_callback_operation(
-                    message.taskType,
-                    "retry",
-                    lambda: self._api_client.retry_job_posting_task(
-                        message.taskId,
-                        JobPostingWorkerRetryRequest(
-                            errorMessage=error_message,
-                            failureReason=failure_reason,
-                            retryCount=retry_count,
-                            workerId=self._worker_id,
-                            queueLatencyMillis=queue_latency_millis,
-                        ),
+                self._api_client.retry_job_posting_task(
+                    message.taskId,
+                    JobPostingWorkerRetryRequest(
+                        errorMessage=error_message,
+                        failureReason=failure_reason,
+                        retryCount=retry_count,
+                        workerId=self._worker_id,
+                        queueLatencyMillis=queue_latency_millis,
                     ),
                 )
             except Exception:
@@ -1286,18 +1260,14 @@ class RabbitMqConsumer:
                     failureReason=failure_reason,
                     errorCode=failure_reason,
                 )
-                self._observe_callback_operation(
-                    message.taskType,
-                    "failed",
-                    lambda: self._api_client.fail_job_posting_task(
-                        message.taskId,
-                        JobPostingWorkerFailureRequest(
-                            errorMessage=error_message,
-                            failureReason=failure_reason,
-                            retryCount=retry_count,
-                            workerId=self._worker_id,
-                            queueLatencyMillis=queue_latency_millis,
-                        ),
+                self._api_client.fail_job_posting_task(
+                    message.taskId,
+                    JobPostingWorkerFailureRequest(
+                        errorMessage=error_message,
+                        failureReason=failure_reason,
+                        retryCount=retry_count,
+                        workerId=self._worker_id,
+                        queueLatencyMillis=queue_latency_millis,
                     ),
                 )
             except Exception:
@@ -1328,18 +1298,14 @@ class RabbitMqConsumer:
                     errorCode=failure_reason,
                     openaiRequestId=openai_request_id,
                 )
-                self._observe_callback_operation(
-                    message.taskType,
-                    "retry",
-                    lambda: self._api_client.retry_analysis_task(
-                        message.taskId,
-                        AnalysisWorkerRetryRequest(
-                            errorMessage=error_message,
-                            failureReason=failure_reason,
-                            retryCount=retry_count,
-                            workerId=self._worker_id,
-                            queueLatencyMillis=queue_latency_millis,
-                        ),
+                self._api_client.retry_analysis_task(
+                    message.taskId,
+                    AnalysisWorkerRetryRequest(
+                        errorMessage=error_message,
+                        failureReason=failure_reason,
+                        retryCount=retry_count,
+                        workerId=self._worker_id,
+                        queueLatencyMillis=queue_latency_millis,
                     ),
                 )
             except Exception:
@@ -1371,18 +1337,14 @@ class RabbitMqConsumer:
                     errorCode=failure_reason,
                     openaiRequestId=openai_request_id,
                 )
-                self._observe_callback_operation(
-                    message.taskType,
-                    "failed",
-                    lambda: self._api_client.fail_analysis_task(
-                        message.taskId,
-                        AnalysisWorkerFailureRequest(
-                            errorMessage=error_message,
-                            failureReason=failure_reason,
-                            retryCount=retry_count,
-                            workerId=self._worker_id,
-                            queueLatencyMillis=queue_latency_millis,
-                        ),
+                self._api_client.fail_analysis_task(
+                    message.taskId,
+                    AnalysisWorkerFailureRequest(
+                        errorMessage=error_message,
+                        failureReason=failure_reason,
+                        retryCount=retry_count,
+                        workerId=self._worker_id,
+                        queueLatencyMillis=queue_latency_millis,
                     ),
                 )
             except Exception:
@@ -1482,14 +1444,14 @@ class RabbitMqConsumer:
             if task_id in self._inflight_task_types:
                 return False
             self._inflight_task_types[task_id] = task_type or "unknown"
-            increment_inflight(task_type)
+            increment_task_inflight(task_type)
             return True
 
     def _release_inflight(self, task_id: str) -> None:
         with self._inflight_lock:
             task_type = self._inflight_task_types.pop(task_id, None)
         if task_type is not None:
-            decrement_inflight(task_type)
+            decrement_task_inflight(task_type)
 
     def _message_log_context(
         self,
@@ -1612,23 +1574,6 @@ class RabbitMqConsumer:
         if started_at is None:
             return None
         return max(int((monotonic() - started_at) * 1000), 0)
-
-    def _elapsed_seconds(self, started_at: float | None) -> float:
-        if started_at is None:
-            return 0.0
-        return max(monotonic() - started_at, 0.0)
-
-    def _observe_callback_operation(
-        self,
-        task_type: str | None,
-        outcome: str,
-        action: Callable[[], Any],
-    ) -> Any:
-        started_at = monotonic()
-        try:
-            return action()
-        finally:
-            observe_callback(task_type, outcome, self._elapsed_seconds(started_at))
 
     def _utcnow(self) -> datetime:
         return datetime.now(timezone.utc)

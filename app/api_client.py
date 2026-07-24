@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 
 from app.config import settings
 from app.logging_utils import ensure_request_id, log_error, log_info, log_warning
+from app.metrics import observe_internal_api
 from app.schemas import (
     AnalysisTaskStatusResponse,
     AnalysisWorkerCompleteRequest,
@@ -53,11 +54,20 @@ class SpringWorkerApiClient:
         self._post(
             f"/api/internal/worker/job-postings/tasks/{task_id}/running",
             request.model_dump(mode="json"),
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_running",
+            method="POST",
         )
 
     def complete_task(self, task_id: str, result: JobPostingIngestResponse) -> JobPostingIngestResponse:
         payload = result.model_dump(mode="json")
-        response = self._post(f"/api/internal/worker/job-postings/tasks/{task_id}/complete", payload)
+        response = self._post(
+            f"/api/internal/worker/job-postings/tasks/{task_id}/complete",
+            payload,
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_complete",
+            method="POST",
+        )
         return self._parse_result(response, JobPostingIngestResponse)
 
     def store_job_posting_result(self, task_id: str, request: JobPostingWorkerResultStoreRequest) -> None:
@@ -65,27 +75,47 @@ class SpringWorkerApiClient:
             f"/api/internal/worker/job-postings/tasks/{task_id}/result",
             request.model_dump(mode="json"),
             idempotent_conflict_as_success=True,
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_result",
+            method="POST",
         )
 
     def retry_job_posting_task(self, task_id: str, request: JobPostingWorkerRetryRequest) -> None:
         self._post(
             f"/api/internal/worker/job-postings/tasks/{task_id}/retry",
             request.model_dump(mode="json"),
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_retry",
+            method="POST",
         )
 
     def fail_job_posting_task(self, task_id: str, request: JobPostingWorkerFailureRequest) -> None:
         self._post(
             f"/api/internal/worker/job-postings/tasks/{task_id}/failed",
             request.model_dump(mode="json"),
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_failed",
+            method="POST",
         )
 
     def get_job_posting_task(self, task_id: str) -> JobPostingTaskStatusResponse:
-        response = self._get(f"/api/internal/worker/job-postings/tasks/{task_id}")
+        response = self._get(
+            f"/api/internal/worker/job-postings/tasks/{task_id}",
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_task_status",
+            method="GET",
+        )
         return self._parse_result(response, JobPostingTaskStatusResponse)
 
     def get_context(self, user_id: int, image_object_key: str | None) -> JobPostingWorkerContextResponse:
         payload = JobPostingWorkerContextRequest(userId=user_id, imageObjectKey=image_object_key).model_dump(mode="json")
-        response = self._post("/api/internal/worker/job-postings/ingest/context", payload)
+        response = self._post(
+            "/api/internal/worker/job-postings/ingest/context",
+            payload,
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_context",
+            method="POST",
+        )
         return self._parse_result(response, JobPostingWorkerContextResponse)
 
     def get_candidates(
@@ -94,6 +124,9 @@ class SpringWorkerApiClient:
         response = self._post(
             "/api/internal/worker/job-postings/classification/candidates",
             extracted.model_dump(mode="json"),
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_candidates",
+            method="POST",
         )
         return self._parse_result(response, list[JobPostingClassificationCandidateResponse])
 
@@ -102,18 +135,27 @@ class SpringWorkerApiClient:
             "/api/internal/worker/job-postings/ingest/finalize",
             request.model_dump(mode="json"),
             idempotent_conflict_as_success=True,
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_finalize",
+            method="POST",
         )
 
     def mark_analysis_running(self, task_id: str, request: AnalysisWorkerRunningRequest) -> None:
         self._post(
             f"/api/internal/worker/analysis/tasks/{task_id}/running",
             request.model_dump(mode="json"),
+            task_type="ANALYSIS",
+            endpoint="analysis_running",
+            method="POST",
         )
 
     def get_analysis_context(self, request: AnalysisWorkerContextRequest) -> AnalysisWorkerContextResponse:
         response = self._post(
             "/api/internal/worker/analysis/context",
             request.model_dump(mode="json"),
+            task_type="ANALYSIS",
+            endpoint="analysis_context",
+            method="POST",
         )
         return self._parse_result(response, AnalysisWorkerContextResponse)
 
@@ -121,12 +163,18 @@ class SpringWorkerApiClient:
         self._post(
             f"/api/internal/worker/analysis/tasks/{task_id}/retry",
             request.model_dump(mode="json"),
+            task_type="ANALYSIS",
+            endpoint="analysis_retry",
+            method="POST",
         )
 
     def fail_analysis_task(self, task_id: str, request: AnalysisWorkerFailureRequest) -> None:
         self._post(
             f"/api/internal/worker/analysis/tasks/{task_id}/failed",
             request.model_dump(mode="json"),
+            task_type="ANALYSIS",
+            endpoint="analysis_failed",
+            method="POST",
         )
 
     def complete_analysis_task(self, task_id: str, request: AnalysisWorkerCompleteRequest) -> None:
@@ -134,6 +182,9 @@ class SpringWorkerApiClient:
             f"/api/internal/worker/analysis/tasks/{task_id}/complete",
             request.model_dump(mode="json"),
             idempotent_conflict_as_success=True,
+            task_type="ANALYSIS",
+            endpoint="analysis_complete",
+            method="POST",
         )
 
     def store_analysis_result(self, task_id: str, request: AnalysisWorkerResultStoreRequest) -> None:
@@ -141,10 +192,18 @@ class SpringWorkerApiClient:
             f"/api/internal/worker/analysis/tasks/{task_id}/result",
             request.model_dump(mode="json"),
             idempotent_conflict_as_success=True,
+            task_type="ANALYSIS",
+            endpoint="analysis_result",
+            method="POST",
         )
 
     def get_analysis_task(self, task_id: str) -> AnalysisTaskStatusResponse:
-        response = self._get(f"/api/internal/worker/analysis/tasks/{task_id}")
+        response = self._get(
+            f"/api/internal/worker/analysis/tasks/{task_id}",
+            task_type="ANALYSIS",
+            endpoint="analysis_task_status",
+            method="GET",
+        )
         return self._parse_result(response, AnalysisTaskStatusResponse)
 
     def _post(
@@ -153,6 +212,9 @@ class SpringWorkerApiClient:
         payload: dict[str, Any] | None = None,
         *,
         idempotent_conflict_as_success: bool = False,
+        task_type: str,
+        endpoint: str,
+        method: str,
     ) -> ApiEnvelope:
         url = settings.spring_api_base_url.rstrip("/") + path
         request_headers = self._build_request_headers()
@@ -168,27 +230,36 @@ class SpringWorkerApiClient:
         try:
             response = self._session.post(url, json=payload, headers=request_headers, timeout=30)
         except requests.RequestException as exc:
+            latency_ms = self._elapsed_millis(started_at)
+            observe_internal_api(task_type, endpoint, method, "failed", latency_ms / 1000)
             log_warning(
                 logger,
                 "worker.api.failed",
                 "Spring API 요청이 전송되지 못했습니다.",
                 method="POST",
                 path=path,
-                latencyMs=self._elapsed_millis(started_at),
+                latencyMs=latency_ms,
                 errorCode="SPRING_API_REQUEST_FAILED",
                 error=str(exc),
             )
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 
-        return self._validate_response(
-            response,
-            path=path,
-            method="POST",
-            idempotent_conflict_as_success=idempotent_conflict_as_success,
-            latency_ms=self._elapsed_millis(started_at),
-        )
+        latency_ms = self._elapsed_millis(started_at)
+        try:
+            envelope = self._validate_response(
+                response,
+                path=path,
+                method=method,
+                idempotent_conflict_as_success=idempotent_conflict_as_success,
+                latency_ms=latency_ms,
+            )
+        except Exception:
+            observe_internal_api(task_type, endpoint, method, "failed", latency_ms / 1000)
+            raise
+        observe_internal_api(task_type, endpoint, method, "succeeded", latency_ms / 1000)
+        return envelope
 
-    def _get(self, path: str) -> ApiEnvelope:
+    def _get(self, path: str, *, task_type: str, endpoint: str, method: str) -> ApiEnvelope:
         url = settings.spring_api_base_url.rstrip("/") + path
         request_headers = self._build_request_headers()
         log_info(
@@ -203,25 +274,34 @@ class SpringWorkerApiClient:
         try:
             response = self._session.get(url, headers=request_headers, timeout=30)
         except requests.RequestException as exc:
+            latency_ms = self._elapsed_millis(started_at)
+            observe_internal_api(task_type, endpoint, method, "failed", latency_ms / 1000)
             log_warning(
                 logger,
                 "worker.api.failed",
                 "Spring API 요청이 전송되지 못했습니다.",
                 method="GET",
                 path=path,
-                latencyMs=self._elapsed_millis(started_at),
+                latencyMs=latency_ms,
                 errorCode="SPRING_API_REQUEST_FAILED",
                 error=str(exc),
             )
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 
-        return self._validate_response(
-            response,
-            path=path,
-            method="GET",
-            idempotent_conflict_as_success=False,
-            latency_ms=self._elapsed_millis(started_at),
-        )
+        latency_ms = self._elapsed_millis(started_at)
+        try:
+            envelope = self._validate_response(
+                response,
+                path=path,
+                method=method,
+                idempotent_conflict_as_success=False,
+                latency_ms=latency_ms,
+            )
+        except Exception:
+            observe_internal_api(task_type, endpoint, method, "failed", latency_ms / 1000)
+            raise
+        observe_internal_api(task_type, endpoint, method, "succeeded", latency_ms / 1000)
+        return envelope
 
     def _validate_response(
         self,
