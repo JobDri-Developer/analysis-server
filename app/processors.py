@@ -53,16 +53,9 @@ class JobPostingTaskProcessor:
             observe_task_queue_wait(message.taskType, queue_latency_millis / 1000)
 
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
+            if self._delivery_service.resume_job_posting_without_llm(message):
+                return
             log_info(logger, "worker.task.started", "job posting 작업을 시작합니다.")
-            self._api_client.mark_job_posting_running(
-                message.taskId,
-                JobPostingWorkerRunningRequest(
-                    workerId=self._worker_id,
-                    retryCount=message.retryCount,
-                    submittedAt=message.submittedAt,
-                ),
-            )
-
             context_started_at = monotonic()
             context = self._api_client.get_context(message.userId, message.imageObjectKey)
             context_fetch_latency_ms = self._elapsed_millis(context_started_at)
@@ -72,6 +65,14 @@ class JobPostingTaskProcessor:
                 "job posting context 조회가 완료되었습니다.",
                 latencyMs=context_fetch_latency_ms,
                 contextFetchLatencyMs=context_fetch_latency_ms,
+            )
+            self._api_client.mark_job_posting_running(
+                message.taskId,
+                JobPostingWorkerRunningRequest(
+                    workerId=self._worker_id,
+                    retryCount=message.retryCount,
+                    submittedAt=message.submittedAt,
+                ),
             )
 
             extracted = self._openai_worker.extract(message.rawText, context.imageUrl)
@@ -108,6 +109,13 @@ class JobPostingTaskProcessor:
                 classification=classification,
                 generated=generated,
             )
+            pending_entry = self._delivery_service.enqueue_pending_delivery(
+                message=message,
+                delivery_kind="JOB_POSTING_FINALIZE",
+                delivery_path="/api/internal/worker/job-postings/ingest/finalize",
+                payload=finalize_request.model_dump(mode="json"),
+                retry_count=message.retryCount,
+            )
             result_store_started_at = monotonic()
             self._delivery_service.store_job_posting_result(message, finalize_request)
             result_store_latency_ms = self._elapsed_millis(result_store_started_at)
@@ -117,13 +125,6 @@ class JobPostingTaskProcessor:
                 "job posting result 저장이 완료되었습니다.",
                 latencyMs=result_store_latency_ms,
                 resultStoreLatencyMs=result_store_latency_ms,
-            )
-            pending_entry = self._delivery_service.enqueue_pending_delivery(
-                message=message,
-                delivery_kind="JOB_POSTING_FINALIZE",
-                delivery_path="/api/internal/worker/job-postings/ingest/finalize",
-                payload=finalize_request.model_dump(mode="json"),
-                retry_count=message.retryCount,
             )
             delivery_started_at = monotonic()
             delivery_message = (
@@ -176,16 +177,9 @@ class JobPostingTaskProcessor:
             observe_task_queue_wait(message.taskType, queue_latency_millis / 1000)
 
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
+            if await self._delivery_service.resume_job_posting_without_llm_async(message):
+                return
             log_info(logger, "worker.task.started", "job posting 작업을 시작합니다.")
-            await self._api_client.mark_job_posting_running_async(
-                message.taskId,
-                JobPostingWorkerRunningRequest(
-                    workerId=self._worker_id,
-                    retryCount=message.retryCount,
-                    submittedAt=message.submittedAt,
-                ),
-            )
-
             context_started_at = monotonic()
             context = await self._api_client.get_context_async(message.userId, message.imageObjectKey)
             context_fetch_latency_ms = self._elapsed_millis(context_started_at)
@@ -195,6 +189,14 @@ class JobPostingTaskProcessor:
                 "job posting context 조회가 완료되었습니다.",
                 latencyMs=context_fetch_latency_ms,
                 contextFetchLatencyMs=context_fetch_latency_ms,
+            )
+            await self._api_client.mark_job_posting_running_async(
+                message.taskId,
+                JobPostingWorkerRunningRequest(
+                    workerId=self._worker_id,
+                    retryCount=message.retryCount,
+                    submittedAt=message.submittedAt,
+                ),
             )
 
             extracted = await self._openai_worker.extract_async(message.rawText, context.imageUrl)
@@ -231,6 +233,13 @@ class JobPostingTaskProcessor:
                 classification=classification,
                 generated=generated,
             )
+            pending_entry = self._delivery_service.enqueue_pending_delivery(
+                message=message,
+                delivery_kind="JOB_POSTING_FINALIZE",
+                delivery_path="/api/internal/worker/job-postings/ingest/finalize",
+                payload=finalize_request.model_dump(mode="json"),
+                retry_count=message.retryCount,
+            )
             result_store_started_at = monotonic()
             await self._delivery_service.store_job_posting_result_async(message, finalize_request)
             result_store_latency_ms = self._elapsed_millis(result_store_started_at)
@@ -240,13 +249,6 @@ class JobPostingTaskProcessor:
                 "job posting result 저장이 완료되었습니다.",
                 latencyMs=result_store_latency_ms,
                 resultStoreLatencyMs=result_store_latency_ms,
-            )
-            pending_entry = self._delivery_service.enqueue_pending_delivery(
-                message=message,
-                delivery_kind="JOB_POSTING_FINALIZE",
-                delivery_path="/api/internal/worker/job-postings/ingest/finalize",
-                payload=finalize_request.model_dump(mode="json"),
-                retry_count=message.retryCount,
             )
             delivery_started_at = monotonic()
             delivery_message = (
@@ -379,15 +381,13 @@ class AnalysisTaskProcessor:
         self._ensure_not_timed_out(queue_latency_millis)
 
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
+            if self._delivery_service.resume_analysis_without_llm(
+                message,
+                worker_id=self._worker_id,
+                queue_latency_millis=queue_latency_millis,
+            ):
+                return
             log_info(logger, "worker.task.started", "analysis 작업을 시작합니다.")
-            self._api_client.mark_analysis_running(
-                message.taskId,
-                AnalysisWorkerRunningRequest(
-                    workerId=self._worker_id,
-                    retryCount=message.retryCount,
-                    submittedAt=message.submittedAt,
-                ),
-            )
             context_started_at = monotonic()
             context = self._api_client.get_analysis_context(
                 AnalysisWorkerContextRequest(
@@ -403,6 +403,14 @@ class AnalysisTaskProcessor:
                 "analysis context 조회가 완료되었습니다.",
                 latencyMs=context_fetch_latency_ms,
                 contextFetchLatencyMs=context_fetch_latency_ms,
+            )
+            self._api_client.mark_analysis_running(
+                message.taskId,
+                AnalysisWorkerRunningRequest(
+                    workerId=self._worker_id,
+                    retryCount=message.retryCount,
+                    submittedAt=message.submittedAt,
+                ),
             )
 
             analysis_started_at = monotonic()
@@ -434,6 +442,13 @@ class AnalysisTaskProcessor:
                 queueLatencyMillis=queue_latency_millis,
                 llmResponse=llm_response,
             )
+            pending_entry = self._delivery_service.enqueue_pending_delivery(
+                message=message,
+                delivery_kind="ANALYSIS_COMPLETE",
+                delivery_path=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
+                payload=complete_request.model_dump(mode="json"),
+                retry_count=message.retryCount,
+            )
             result_store_started_at = monotonic()
             self._delivery_service.store_analysis_result(message, llm_response)
             result_store_latency_ms = self._elapsed_millis(result_store_started_at)
@@ -443,13 +458,6 @@ class AnalysisTaskProcessor:
                 "analysis result 저장이 완료되었습니다.",
                 latencyMs=result_store_latency_ms,
                 resultStoreLatencyMs=result_store_latency_ms,
-            )
-            pending_entry = self._delivery_service.enqueue_pending_delivery(
-                message=message,
-                delivery_kind="ANALYSIS_COMPLETE",
-                delivery_path=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
-                payload=complete_request.model_dump(mode="json"),
-                retry_count=message.retryCount,
             )
             delivery_started_at = monotonic()
             delivered = self._delivery_service.deliver_pending_entry(
@@ -487,15 +495,13 @@ class AnalysisTaskProcessor:
         self._ensure_not_timed_out(queue_latency_millis)
 
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
+            if await self._delivery_service.resume_analysis_without_llm_async(
+                message,
+                worker_id=self._worker_id,
+                queue_latency_millis=queue_latency_millis,
+            ):
+                return
             log_info(logger, "worker.task.started", "analysis 작업을 시작합니다.")
-            await self._api_client.mark_analysis_running_async(
-                message.taskId,
-                AnalysisWorkerRunningRequest(
-                    workerId=self._worker_id,
-                    retryCount=message.retryCount,
-                    submittedAt=message.submittedAt,
-                ),
-            )
             context_started_at = monotonic()
             context = await self._api_client.get_analysis_context_async(
                 AnalysisWorkerContextRequest(
@@ -511,6 +517,14 @@ class AnalysisTaskProcessor:
                 "analysis context 조회가 완료되었습니다.",
                 latencyMs=context_fetch_latency_ms,
                 contextFetchLatencyMs=context_fetch_latency_ms,
+            )
+            await self._api_client.mark_analysis_running_async(
+                message.taskId,
+                AnalysisWorkerRunningRequest(
+                    workerId=self._worker_id,
+                    retryCount=message.retryCount,
+                    submittedAt=message.submittedAt,
+                ),
             )
 
             analysis_started_at = monotonic()
@@ -542,6 +556,13 @@ class AnalysisTaskProcessor:
                 queueLatencyMillis=queue_latency_millis,
                 llmResponse=llm_response,
             )
+            pending_entry = self._delivery_service.enqueue_pending_delivery(
+                message=message,
+                delivery_kind="ANALYSIS_COMPLETE",
+                delivery_path=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
+                payload=complete_request.model_dump(mode="json"),
+                retry_count=message.retryCount,
+            )
             result_store_started_at = monotonic()
             await self._delivery_service.store_analysis_result_async(message, llm_response)
             result_store_latency_ms = self._elapsed_millis(result_store_started_at)
@@ -551,13 +572,6 @@ class AnalysisTaskProcessor:
                 "analysis result 저장이 완료되었습니다.",
                 latencyMs=result_store_latency_ms,
                 resultStoreLatencyMs=result_store_latency_ms,
-            )
-            pending_entry = self._delivery_service.enqueue_pending_delivery(
-                message=message,
-                delivery_kind="ANALYSIS_COMPLETE",
-                delivery_path=f"/api/internal/worker/analysis/tasks/{message.taskId}/complete",
-                payload=complete_request.model_dump(mode="json"),
-                retry_count=message.retryCount,
             )
             delivery_started_at = monotonic()
             delivered = await self._delivery_service.deliver_pending_entry_async(

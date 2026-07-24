@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 from time import monotonic
 from typing import Any, TypeVar
 
 import httpx
 import requests
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from app.config import settings
 from app.logging_utils import ensure_request_id, log_error, log_info, log_warning
@@ -34,6 +35,7 @@ from app.schemas import (
     JobPostingWorkerRunningRequest,
     NonRetryableWorkerError,
     RetryableWorkerError,
+    WorkerTaskStoredResultResponse,
 )
 
 T = TypeVar("T")
@@ -110,6 +112,18 @@ class SpringWorkerApiClient:
             method="GET",
         )
         return self._parse_result(response, JobPostingTaskStatusResponse)
+
+    def get_job_posting_result(self, task_id: str) -> JobPostingWorkerFinalizeRequest | None:
+        response = self._get_optional(
+            f"/api/internal/worker/job-postings/tasks/{task_id}/result",
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_task_result",
+            method="GET",
+        )
+        if response is None:
+            return None
+        stored_result = self._parse_result(response, WorkerTaskStoredResultResponse)
+        return self._parse_json_payload(stored_result.resultPayload, JobPostingWorkerFinalizeRequest)
 
     def get_context(self, user_id: int, image_object_key: str | None) -> JobPostingWorkerContextResponse:
         payload = JobPostingWorkerContextRequest(userId=user_id, imageObjectKey=image_object_key).model_dump(mode="json")
@@ -207,6 +221,18 @@ class SpringWorkerApiClient:
         )
         return self._parse_result(response, AnalysisTaskStatusResponse)
 
+    def get_analysis_result(self, task_id: str) -> AnalysisWorkerResultStoreRequest | None:
+        response = self._get_optional(
+            f"/api/internal/worker/analysis/tasks/{task_id}/result",
+            task_type="ANALYSIS",
+            endpoint="analysis_task_result",
+            method="GET",
+        )
+        if response is None:
+            return None
+        stored_result = self._parse_result(response, WorkerTaskStoredResultResponse)
+        return self._parse_json_payload(stored_result.resultPayload, AnalysisWorkerResultStoreRequest)
+
     async def aclose(self) -> None:
         await self._async_client.aclose()
 
@@ -264,6 +290,18 @@ class SpringWorkerApiClient:
             method="GET",
         )
         return self._parse_result(response, JobPostingTaskStatusResponse)
+
+    async def get_job_posting_result_async(self, task_id: str) -> JobPostingWorkerFinalizeRequest | None:
+        response = await self._get_optional_async(
+            f"/api/internal/worker/job-postings/tasks/{task_id}/result",
+            task_type="JOB_POSTING_INGEST",
+            endpoint="job_posting_task_result",
+            method="GET",
+        )
+        if response is None:
+            return None
+        stored_result = self._parse_result(response, WorkerTaskStoredResultResponse)
+        return self._parse_json_payload(stored_result.resultPayload, JobPostingWorkerFinalizeRequest)
 
     async def get_context_async(self, user_id: int, image_object_key: str | None) -> JobPostingWorkerContextResponse:
         response = await self._post_async(
@@ -361,6 +399,18 @@ class SpringWorkerApiClient:
         )
         return self._parse_result(response, AnalysisTaskStatusResponse)
 
+    async def get_analysis_result_async(self, task_id: str) -> AnalysisWorkerResultStoreRequest | None:
+        response = await self._get_optional_async(
+            f"/api/internal/worker/analysis/tasks/{task_id}/result",
+            task_type="ANALYSIS",
+            endpoint="analysis_task_result",
+            method="GET",
+        )
+        if response is None:
+            return None
+        stored_result = self._parse_result(response, WorkerTaskStoredResultResponse)
+        return self._parse_json_payload(stored_result.resultPayload, AnalysisWorkerResultStoreRequest)
+
     def _post(
         self,
         path: str,
@@ -387,6 +437,17 @@ class SpringWorkerApiClient:
             task_type=task_type,
             endpoint=endpoint,
             method=method,
+        )
+
+    def _get_optional(self, path: str, *, task_type: str, endpoint: str, method: str) -> ApiEnvelope | None:
+        return self._request(
+            http_method="GET",
+            path=path,
+            payload=None,
+            task_type=task_type,
+            endpoint=endpoint,
+            method=method,
+            allow_not_found=True,
         )
 
     async def _post_async(
@@ -417,6 +478,17 @@ class SpringWorkerApiClient:
             method=method,
         )
 
+    async def _get_optional_async(self, path: str, *, task_type: str, endpoint: str, method: str) -> ApiEnvelope | None:
+        return await self._request_async(
+            http_method="GET",
+            path=path,
+            payload=None,
+            task_type=task_type,
+            endpoint=endpoint,
+            method=method,
+            allow_not_found=True,
+        )
+
     def _request(
         self,
         *,
@@ -426,7 +498,8 @@ class SpringWorkerApiClient:
         task_type: str,
         endpoint: str,
         method: str,
-    ) -> ApiEnvelope:
+        allow_not_found: bool = False,
+    ) -> ApiEnvelope | None:
         url = settings.spring_api_base_url.rstrip("/") + path
         request_headers = self._build_request_headers()
         log_info(
@@ -461,6 +534,19 @@ class SpringWorkerApiClient:
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 
         latency_ms = self._elapsed_millis(started_at)
+        if allow_not_found and response.status_code == 404:
+            observe_internal_api(task_type, endpoint, method, "not_found", latency_ms / 1000)
+            log_info(
+                logger,
+                "worker.api.response",
+                "Spring API 조회 결과가 존재하지 않습니다.",
+                method=method,
+                path=path,
+                status=response.status_code,
+                latencyMs=latency_ms,
+                responseCode="NOT_FOUND",
+            )
+            return None
         try:
             envelope = self._validate_response(
                 response,
@@ -483,7 +569,8 @@ class SpringWorkerApiClient:
         task_type: str,
         endpoint: str,
         method: str,
-    ) -> ApiEnvelope:
+        allow_not_found: bool = False,
+    ) -> ApiEnvelope | None:
         request_headers = self._build_request_headers()
         log_info(
             logger,
@@ -517,6 +604,19 @@ class SpringWorkerApiClient:
             raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
 
         latency_ms = self._elapsed_millis(started_at)
+        if allow_not_found and response.status_code == 404:
+            observe_internal_api(task_type, endpoint, method, "not_found", latency_ms / 1000)
+            log_info(
+                logger,
+                "worker.api.response",
+                "Spring API 조회 결과가 존재하지 않습니다.",
+                method=method,
+                path=path,
+                status=response.status_code,
+                latencyMs=latency_ms,
+                responseCode="NOT_FOUND",
+            )
+            return None
         try:
             envelope = self._validate_response(
                 response,
@@ -666,6 +766,18 @@ class SpringWorkerApiClient:
         if envelope.result is None:
             return None
         return self._parse_result(envelope, expected_type)
+
+    def _parse_json_payload(self, payload: str, expected_type: type[T] | Any) -> T:
+        try:
+            parsed_payload = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise RetryableWorkerError(f"Spring API stored result payload 파싱 실패: {exc}") from exc
+
+        adapter = TypeAdapter(expected_type)
+        try:
+            return adapter.validate_python(parsed_payload)
+        except ValidationError as exc:
+            raise RetryableWorkerError(f"Spring API stored result payload 스키마 검증 실패: {exc}") from exc
 
     def _elapsed_millis(self, started_at: float) -> int:
         return max(int((monotonic() - started_at) * 1000), 0)
