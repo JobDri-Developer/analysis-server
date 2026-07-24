@@ -525,7 +525,7 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIsNone(log_record.messageId)
         self.assertIsNone(log_record.workerId)
         self.assertIsNone(log_record.retryCount)
-        self.assertEqual(log_record.logType, "application")
+        self.assertEqual(log_record.logType, settings.worker_log_type)
 
     def test_json_log_formatter_does_not_mask_token_usage_metrics(self) -> None:
         log_record = logging.LogRecord(

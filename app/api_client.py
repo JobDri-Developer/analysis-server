@@ -216,19 +216,56 @@ class SpringWorkerApiClient:
         endpoint: str,
         method: str,
     ) -> ApiEnvelope:
+        return self._request(
+            http_method="POST",
+            path=path,
+            payload=payload,
+            idempotent_conflict_as_success=idempotent_conflict_as_success,
+            task_type=task_type,
+            endpoint=endpoint,
+            method=method,
+        )
+
+    def _get(self, path: str, *, task_type: str, endpoint: str, method: str) -> ApiEnvelope:
+        return self._request(
+            http_method="GET",
+            path=path,
+            payload=None,
+            idempotent_conflict_as_success=False,
+            task_type=task_type,
+            endpoint=endpoint,
+            method=method,
+        )
+
+    def _request(
+        self,
+        *,
+        http_method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        idempotent_conflict_as_success: bool,
+        task_type: str,
+        endpoint: str,
+        method: str,
+    ) -> ApiEnvelope:
         url = settings.spring_api_base_url.rstrip("/") + path
         request_headers = self._build_request_headers()
         log_info(
             logger,
             "worker.api.request",
             "Spring API 요청을 전송합니다.",
-            method="POST",
+            method=http_method,
             path=path,
             forwardedRequestId=request_headers["X-Request-Id"],
         )
         started_at = monotonic()
         try:
-            response = self._session.post(url, json=payload, headers=request_headers, timeout=30)
+            response = self._send_request(
+                http_method=http_method,
+                url=url,
+                payload=payload,
+                headers=request_headers,
+            )
         except requests.RequestException as exc:
             latency_ms = self._elapsed_millis(started_at)
             observe_internal_api(task_type, endpoint, method, "failed", latency_ms / 1000)
@@ -236,7 +273,7 @@ class SpringWorkerApiClient:
                 logger,
                 "worker.api.failed",
                 "Spring API 요청이 전송되지 못했습니다.",
-                method="POST",
+                method=http_method,
                 path=path,
                 latencyMs=latency_ms,
                 errorCode="SPRING_API_REQUEST_FAILED",
@@ -259,49 +296,17 @@ class SpringWorkerApiClient:
         observe_internal_api(task_type, endpoint, method, "succeeded", latency_ms / 1000)
         return envelope
 
-    def _get(self, path: str, *, task_type: str, endpoint: str, method: str) -> ApiEnvelope:
-        url = settings.spring_api_base_url.rstrip("/") + path
-        request_headers = self._build_request_headers()
-        log_info(
-            logger,
-            "worker.api.request",
-            "Spring API 요청을 전송합니다.",
-            method="GET",
-            path=path,
-            forwardedRequestId=request_headers["X-Request-Id"],
-        )
-        started_at = monotonic()
-        try:
-            response = self._session.get(url, headers=request_headers, timeout=30)
-        except requests.RequestException as exc:
-            latency_ms = self._elapsed_millis(started_at)
-            observe_internal_api(task_type, endpoint, method, "failed", latency_ms / 1000)
-            log_warning(
-                logger,
-                "worker.api.failed",
-                "Spring API 요청이 전송되지 못했습니다.",
-                method="GET",
-                path=path,
-                latencyMs=latency_ms,
-                errorCode="SPRING_API_REQUEST_FAILED",
-                error=str(exc),
-            )
-            raise RetryableWorkerError(f"Spring API 호출 실패: {exc}") from exc
-
-        latency_ms = self._elapsed_millis(started_at)
-        try:
-            envelope = self._validate_response(
-                response,
-                path=path,
-                method=method,
-                idempotent_conflict_as_success=False,
-                latency_ms=latency_ms,
-            )
-        except Exception:
-            observe_internal_api(task_type, endpoint, method, "failed", latency_ms / 1000)
-            raise
-        observe_internal_api(task_type, endpoint, method, "succeeded", latency_ms / 1000)
-        return envelope
+    def _send_request(
+        self,
+        *,
+        http_method: str,
+        url: str,
+        payload: dict[str, Any] | None,
+        headers: dict[str, str],
+    ):
+        if http_method == "POST":
+            return self._session.post(url, json=payload, headers=headers, timeout=30)
+        return self._session.get(url, headers=headers, timeout=30)
 
     def _validate_response(
         self,

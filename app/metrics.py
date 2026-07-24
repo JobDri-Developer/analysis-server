@@ -16,6 +16,9 @@ DURATION_BUCKETS = (
     60.0,
     120.0,
     300.0,
+    600.0,
+    900.0,
+    1800.0,
 )
 
 _TASK_TYPE_LABELS = {

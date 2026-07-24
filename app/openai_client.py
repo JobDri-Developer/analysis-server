@@ -112,11 +112,11 @@ class JobPostingOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = JobPostingClassificationResultResponse.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            observe_llm_request(self._task_type, operation, "fallback", self._elapsed_seconds(started_at))
             increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
             log_warning(
                 logger,
-                "openai.classify.failed",
+                "openai.classify.fallback",
                 "OpenAI classify 응답 검증에 실패해 fallback을 사용합니다.",
                 model=self._model,
                 latencyMs=self._elapsed_millis(started_at),
@@ -171,11 +171,11 @@ class JobPostingOpenAiWorker:
             payload = self._parse_json(response.output_text)
             result = JobPostingGenerateResponse.model_validate(payload)
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            observe_llm_request(self._task_type, operation, "fallback", self._elapsed_seconds(started_at))
             increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
             log_warning(
                 logger,
-                "openai.generate.failed",
+                "openai.generate.fallback",
                 "OpenAI generate 응답 검증에 실패해 fallback을 사용합니다.",
                 model=self._model,
                 latencyMs=self._elapsed_millis(started_at),
@@ -440,22 +440,6 @@ class AnalysisOpenAiWorker:
                 temperature=0.2,
                 input=prompt,
             )
-            payload = self._parse_json(response.output_text)
-            result = AnalysisLlmResponse.model_validate(payload)
-            request_id = self._extract_request_id(response)
-            usage_fields = self._extract_usage_fields(response)
-            log_info(
-                logger,
-                "openai.generate.completed",
-                "OpenAI analysis 호출이 완료되었습니다.",
-                model=self._model,
-                operation="analysis",
-                latencyMs=self._elapsed_millis(started_at),
-                openaiRequestId=request_id,
-                **usage_fields,
-            )
-            observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
-            return result, request_id
         except RateLimitError as exc:
             increment_llm_request_error(self._task_type, operation, "RATE_LIMIT")
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
@@ -474,15 +458,6 @@ class AnalysisOpenAiWorker:
                 failure_reason="OPENAI_TIMEOUT",
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
-        except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
-            self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise NonRetryableWorkerError(
-                f"OpenAI 입력/응답 검증 실패: {exc}",
-                failure_reason="VALIDATION_ERROR",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
         except APIConnectionError as exc:
             increment_llm_request_error(self._task_type, operation, "OPENAI_TIMEOUT")
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
@@ -492,17 +467,36 @@ class AnalysisOpenAiWorker:
                 failure_reason="OPENAI_TIMEOUT",
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
+        except BadRequestError as exc:
+            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
+            self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            raise NonRetryableWorkerError(
+                f"OpenAI 입력/응답 검증 실패: {exc}",
+                failure_reason="VALIDATION_ERROR",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
         except APIStatusError as exc:
-            error_type = "RATE_LIMIT" if getattr(exc, "status_code", None) == 429 else "INTERNAL_ERROR"
+            status_code = getattr(exc, "status_code", None)
+            error_type = "RATE_LIMIT" if status_code == 429 else "INTERNAL_ERROR"
             increment_llm_request_error(self._task_type, operation, error_type)
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
             observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            failure_reason = "INTERNAL_ERROR"
-            if getattr(exc, "status_code", None) == 429:
-                failure_reason = "RATE_LIMIT"
-            raise RetryableWorkerError(
-                f"OpenAI API 상태 오류: {exc}",
-                failure_reason=failure_reason,
+            if status_code == 429:
+                raise RetryableWorkerError(
+                    f"OpenAI rate limit 발생: {exc}",
+                    failure_reason="RATE_LIMIT",
+                    openai_request_id=self._extract_request_id(exc),
+                ) from exc
+            if status_code is not None and status_code >= 500:
+                raise RetryableWorkerError(
+                    f"OpenAI API 상태 오류: {exc}",
+                    failure_reason="INTERNAL_ERROR",
+                    openai_request_id=self._extract_request_id(exc),
+                ) from exc
+            raise NonRetryableWorkerError(
+                f"OpenAI 입력/응답 검증 실패: {exc}",
+                failure_reason="VALIDATION_ERROR",
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
         except Exception as exc:
@@ -512,6 +506,33 @@ class AnalysisOpenAiWorker:
             raise RetryableWorkerError(
                 f"OpenAI 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
                 failure_reason="INTERNAL_ERROR",
+                openai_request_id=self._extract_request_id(exc),
+            ) from exc
+
+        try:
+            payload = self._parse_json(response.output_text)
+            result = AnalysisLlmResponse.model_validate(payload)
+            request_id = self._extract_request_id(response)
+            usage_fields = self._extract_usage_fields(response)
+            log_info(
+                logger,
+                "openai.generate.completed",
+                "OpenAI analysis 호출이 완료되었습니다.",
+                model=self._model,
+                operation="analysis",
+                latencyMs=self._elapsed_millis(started_at),
+                openaiRequestId=request_id,
+                **usage_fields,
+            )
+            observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            return result, request_id
+        except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
+            self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            raise NonRetryableWorkerError(
+                f"OpenAI 입력/응답 검증 실패: {exc}",
+                failure_reason="VALIDATION_ERROR",
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
 

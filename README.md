@@ -62,6 +62,14 @@ flowchart LR
 
 또한 `basic_qos(prefetch_count=WORKER_PREFETCH_COUNT)`를 사용해 한 번에 가져올 메시지 수를 제한합니다. 기본값은 `1`입니다.
 
+현재는 여기에 더해 task type별 동시 처리 상한 설정 훅도 준비되어 있습니다.
+
+- `WORKER_DEFAULT_CONCURRENCY_LIMIT`
+- `WORKER_ANALYSIS_CONCURRENCY_LIMIT`
+- `WORKER_JOB_POSTING_CONCURRENCY_LIMIT`
+
+1차 구현에서는 기존 blocking consume 구조를 유지한 채 슬롯 관리 abstraction만 도입했고, 다음 단계 async consumer 전환 시 같은 설정을 재사용할 수 있습니다.
+
 ### 3.3 워커가 발행하는 메시지도 있나요?
 
 있습니다. 이 워커는 소비자이면서 일부 상황에서는 다시 RabbitMQ에 메시지를 발행합니다.
@@ -294,6 +302,10 @@ APP_WORKER_ANALYSIS_EXCHANGE=jobdri.worker.exchange
 APP_WORKER_ANALYSIS_QUEUE=jobdri.analysis.execute
 APP_WORKER_ANALYSIS_ROUTING_KEY=analysis.execute
 APP_WORKER_ANALYSIS_DLQ=jobdri.analysis.execute.dlq
+
+WORKER_DEFAULT_CONCURRENCY_LIMIT=1
+WORKER_ANALYSIS_CONCURRENCY_LIMIT=1
+WORKER_JOB_POSTING_CONCURRENCY_LIMIT=1
 ```
 
 전체 목록은 [`app/config.py`](/Users/shinae/Desktop/study/analysis-server/app/config.py) 와 [`deploy/docker-compose.worker.prod.yml`](/Users/shinae/Desktop/study/analysis-server/deploy/docker-compose.worker.prod.yml) 를 참고하면 됩니다.
