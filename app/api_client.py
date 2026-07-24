@@ -64,7 +64,7 @@ class SpringWorkerApiClient:
             method="POST",
         )
 
-    def complete_task(self, task_id: str, result: JobPostingIngestResponse) -> JobPostingIngestResponse:
+    def complete_task(self, task_id: str, result: JobPostingIngestResponse) -> JobPostingIngestResponse | None:
         payload = result.model_dump(mode="json")
         response = self._post(
             f"/api/internal/worker/job-postings/tasks/{task_id}/complete",
@@ -73,13 +73,12 @@ class SpringWorkerApiClient:
             endpoint="job_posting_complete",
             method="POST",
         )
-        return self._parse_result(response, JobPostingIngestResponse)
+        return self._parse_optional_result(response, JobPostingIngestResponse)
 
     def store_job_posting_result(self, task_id: str, request: JobPostingWorkerResultStoreRequest) -> None:
         self._post(
             f"/api/internal/worker/job-postings/tasks/{task_id}/result",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="JOB_POSTING_INGEST",
             endpoint="job_posting_result",
             method="POST",
@@ -139,7 +138,6 @@ class SpringWorkerApiClient:
         self._post(
             "/api/internal/worker/job-postings/ingest/finalize",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="JOB_POSTING_INGEST",
             endpoint="job_posting_finalize",
             method="POST",
@@ -186,7 +184,6 @@ class SpringWorkerApiClient:
         self._post(
             f"/api/internal/worker/analysis/tasks/{task_id}/complete",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="ANALYSIS",
             endpoint="analysis_complete",
             method="POST",
@@ -196,7 +193,6 @@ class SpringWorkerApiClient:
         self._post(
             f"/api/internal/worker/analysis/tasks/{task_id}/result",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="ANALYSIS",
             endpoint="analysis_result",
             method="POST",
@@ -223,7 +219,7 @@ class SpringWorkerApiClient:
             method="POST",
         )
 
-    async def complete_task_async(self, task_id: str, result: JobPostingIngestResponse) -> JobPostingIngestResponse:
+    async def complete_task_async(self, task_id: str, result: JobPostingIngestResponse) -> JobPostingIngestResponse | None:
         response = await self._post_async(
             f"/api/internal/worker/job-postings/tasks/{task_id}/complete",
             result.model_dump(mode="json"),
@@ -231,13 +227,12 @@ class SpringWorkerApiClient:
             endpoint="job_posting_complete",
             method="POST",
         )
-        return self._parse_result(response, JobPostingIngestResponse)
+        return self._parse_optional_result(response, JobPostingIngestResponse)
 
     async def store_job_posting_result_async(self, task_id: str, request: JobPostingWorkerResultStoreRequest) -> None:
         await self._post_async(
             f"/api/internal/worker/job-postings/tasks/{task_id}/result",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="JOB_POSTING_INGEST",
             endpoint="job_posting_result",
             method="POST",
@@ -297,7 +292,6 @@ class SpringWorkerApiClient:
         await self._post_async(
             "/api/internal/worker/job-postings/ingest/finalize",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="JOB_POSTING_INGEST",
             endpoint="job_posting_finalize",
             method="POST",
@@ -344,7 +338,6 @@ class SpringWorkerApiClient:
         await self._post_async(
             f"/api/internal/worker/analysis/tasks/{task_id}/complete",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="ANALYSIS",
             endpoint="analysis_complete",
             method="POST",
@@ -354,7 +347,6 @@ class SpringWorkerApiClient:
         await self._post_async(
             f"/api/internal/worker/analysis/tasks/{task_id}/result",
             request.model_dump(mode="json"),
-            idempotent_conflict_as_success=True,
             task_type="ANALYSIS",
             endpoint="analysis_result",
             method="POST",
@@ -374,7 +366,6 @@ class SpringWorkerApiClient:
         path: str,
         payload: dict[str, Any] | None = None,
         *,
-        idempotent_conflict_as_success: bool = False,
         task_type: str,
         endpoint: str,
         method: str,
@@ -383,7 +374,6 @@ class SpringWorkerApiClient:
             http_method="POST",
             path=path,
             payload=payload,
-            idempotent_conflict_as_success=idempotent_conflict_as_success,
             task_type=task_type,
             endpoint=endpoint,
             method=method,
@@ -394,7 +384,6 @@ class SpringWorkerApiClient:
             http_method="GET",
             path=path,
             payload=None,
-            idempotent_conflict_as_success=False,
             task_type=task_type,
             endpoint=endpoint,
             method=method,
@@ -405,7 +394,6 @@ class SpringWorkerApiClient:
         path: str,
         payload: dict[str, Any] | None = None,
         *,
-        idempotent_conflict_as_success: bool = False,
         task_type: str,
         endpoint: str,
         method: str,
@@ -414,7 +402,6 @@ class SpringWorkerApiClient:
             http_method="POST",
             path=path,
             payload=payload,
-            idempotent_conflict_as_success=idempotent_conflict_as_success,
             task_type=task_type,
             endpoint=endpoint,
             method=method,
@@ -425,7 +412,6 @@ class SpringWorkerApiClient:
             http_method="GET",
             path=path,
             payload=None,
-            idempotent_conflict_as_success=False,
             task_type=task_type,
             endpoint=endpoint,
             method=method,
@@ -437,7 +423,6 @@ class SpringWorkerApiClient:
         http_method: str,
         path: str,
         payload: dict[str, Any] | None,
-        idempotent_conflict_as_success: bool,
         task_type: str,
         endpoint: str,
         method: str,
@@ -481,7 +466,6 @@ class SpringWorkerApiClient:
                 response,
                 path=path,
                 method=method,
-                idempotent_conflict_as_success=idempotent_conflict_as_success,
                 latency_ms=latency_ms,
             )
         except Exception:
@@ -496,7 +480,6 @@ class SpringWorkerApiClient:
         http_method: str,
         path: str,
         payload: dict[str, Any] | None,
-        idempotent_conflict_as_success: bool,
         task_type: str,
         endpoint: str,
         method: str,
@@ -539,7 +522,6 @@ class SpringWorkerApiClient:
                 response,
                 path=path,
                 method=method,
-                idempotent_conflict_as_success=idempotent_conflict_as_success,
                 latency_ms=latency_ms,
             )
         except Exception:
@@ -578,28 +560,8 @@ class SpringWorkerApiClient:
         *,
         path: str,
         method: str,
-        idempotent_conflict_as_success: bool,
         latency_ms: int,
     ) -> ApiEnvelope:
-        if response.status_code == 409 and idempotent_conflict_as_success:
-            log_info(
-                logger,
-                "worker.api.response",
-                "Spring API 멱등 충돌을 성공으로 처리했습니다.",
-                method=method,
-                path=path,
-                status=response.status_code,
-                latencyMs=latency_ms,
-                idempotentConflictAsSuccess=True,
-                responseCode="IDEMPOTENT_CONFLICT",
-            )
-            return ApiEnvelope(
-                isSuccess=True,
-                code="IDEMPOTENT_CONFLICT",
-                message="409 conflict를 멱등 성공으로 처리했습니다.",
-                result=None,
-                error=None,
-            )
         if response.status_code >= 500:
             log_warning(
                 logger,
@@ -699,6 +661,11 @@ class SpringWorkerApiClient:
     def _parse_result(self, envelope: ApiEnvelope, expected_type: type[T] | Any) -> T:
         adapter = TypeAdapter(expected_type)
         return adapter.validate_python(envelope.result)
+
+    def _parse_optional_result(self, envelope: ApiEnvelope, expected_type: type[T] | Any) -> T | None:
+        if envelope.result is None:
+            return None
+        return self._parse_result(envelope, expected_type)
 
     def _elapsed_millis(self, started_at: float) -> int:
         return max(int((monotonic() - started_at) * 1000), 0)

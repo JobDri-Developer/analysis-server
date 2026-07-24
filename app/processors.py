@@ -17,6 +17,7 @@ from app.schemas import (
     AnalysisWorkerRunningRequest,
     JobPostingClassificationCandidateResponse,
     JobPostingClassificationResultResponse,
+    JobPostingGenerateResponse,
     JobPostingIngestResponse,
     JobPostingIngestTaskMessage,
     JobPostingWorkerFinalizeRequest,
@@ -97,48 +98,11 @@ class JobPostingTaskProcessor:
                 candidates,
             )
             if classification.confidence < settings.job_posting_confidence_threshold:
-                result = JobPostingIngestResponse(
-                    savedToDatabase=False,
-                    message="소분류 분류 confidence가 낮아 저장을 보류했습니다.",
-                    extracted=extracted,
-                    candidates=candidates,
-                    classification=classification,
-                    generated=None,
-                    saved=None,
-                )
-                delivery_started_at = monotonic()
-                log_info(
-                    logger,
-                    "worker.delivery.started",
-                    "저신뢰도 분기 complete 전달을 시작합니다.",
-                    deliveryKind="JOB_POSTING_COMPLETE",
-                )
-                self._delivery_service.complete_low_confidence_job_posting(message, result)
-                complete_delivery_latency_ms = self._elapsed_millis(delivery_started_at)
-                log_info(
-                    logger,
-                    "worker.delivery.completed",
-                    "저신뢰도 분기 complete 전달이 완료되었습니다.",
-                    deliveryKind="JOB_POSTING_COMPLETE",
-                    latencyMs=complete_delivery_latency_ms,
-                    completeDeliveryLatencyMs=complete_delivery_latency_ms,
-                )
-                log_info(
-                    logger,
-                    "worker.task.completed",
-                    "job posting 작업이 완료되었습니다.",
-                    confidence=classification.confidence,
-                    taskProcessingLatencyMs=self._elapsed_millis(task_started_at),
-                    contextFetchLatencyMs=context_fetch_latency_ms,
-                    candidateFetchLatencyMs=candidate_fetch_latency_ms,
-                    completeDeliveryLatencyMs=complete_delivery_latency_ms,
-                )
-                return
-
-            generated = self._openai_worker.generate(extracted, classification)
-            finalize_request = JobPostingWorkerFinalizeRequest(
-                taskId=message.taskId,
-                userId=message.userId,
+                generated = self._build_low_confidence_generated(extracted)
+            else:
+                generated = self._openai_worker.generate(extracted, classification)
+            finalize_request = self._build_finalize_request(
+                message,
                 extracted=extracted,
                 candidates=candidates,
                 classification=classification,
@@ -162,6 +126,17 @@ class JobPostingTaskProcessor:
                 retry_count=message.retryCount,
             )
             delivery_started_at = monotonic()
+            delivery_message = (
+                "저신뢰도 분기 finalize 전달을 시작합니다."
+                if classification.confidence < settings.job_posting_confidence_threshold
+                else "job posting finalize 전달을 시작합니다."
+            )
+            log_info(
+                logger,
+                "worker.delivery.started",
+                delivery_message,
+                deliveryKind=pending_entry.deliveryKind,
+            )
             delivered = self._delivery_service.deliver_pending_entry(
                 pending_entry,
                 retry_count=message.retryCount,
@@ -174,6 +149,7 @@ class JobPostingTaskProcessor:
                     "worker.delivery.deferred",
                     "job posting finalize 전달이 보류되어 recovery spool에 남겼습니다.",
                     deliveryKind=pending_entry.deliveryKind,
+                    confidence=classification.confidence,
                     taskProcessingLatencyMs=self._elapsed_millis(task_started_at),
                     finalizeDeliveryLatencyMs=finalize_delivery_latency_ms,
                 )
@@ -182,6 +158,7 @@ class JobPostingTaskProcessor:
                 logger,
                 "worker.task.completed",
                 "job posting 작업이 완료되었습니다.",
+                confidence=classification.confidence,
                 taskProcessingLatencyMs=self._elapsed_millis(task_started_at),
                 contextFetchLatencyMs=context_fetch_latency_ms,
                 candidateFetchLatencyMs=candidate_fetch_latency_ms,
@@ -244,48 +221,11 @@ class JobPostingTaskProcessor:
                 candidates,
             )
             if classification.confidence < settings.job_posting_confidence_threshold:
-                result = JobPostingIngestResponse(
-                    savedToDatabase=False,
-                    message="소분류 분류 confidence가 낮아 저장을 보류했습니다.",
-                    extracted=extracted,
-                    candidates=candidates,
-                    classification=classification,
-                    generated=None,
-                    saved=None,
-                )
-                delivery_started_at = monotonic()
-                log_info(
-                    logger,
-                    "worker.delivery.started",
-                    "저신뢰도 분기 complete 전달을 시작합니다.",
-                    deliveryKind="JOB_POSTING_COMPLETE",
-                )
-                await self._delivery_service.complete_low_confidence_job_posting_async(message, result)
-                complete_delivery_latency_ms = self._elapsed_millis(delivery_started_at)
-                log_info(
-                    logger,
-                    "worker.delivery.completed",
-                    "저신뢰도 분기 complete 전달이 완료되었습니다.",
-                    deliveryKind="JOB_POSTING_COMPLETE",
-                    latencyMs=complete_delivery_latency_ms,
-                    completeDeliveryLatencyMs=complete_delivery_latency_ms,
-                )
-                log_info(
-                    logger,
-                    "worker.task.completed",
-                    "job posting 작업이 완료되었습니다.",
-                    confidence=classification.confidence,
-                    taskProcessingLatencyMs=self._elapsed_millis(task_started_at),
-                    contextFetchLatencyMs=context_fetch_latency_ms,
-                    candidateFetchLatencyMs=candidate_fetch_latency_ms,
-                    completeDeliveryLatencyMs=complete_delivery_latency_ms,
-                )
-                return
-
-            generated = await self._openai_worker.generate_async(extracted, classification)
-            finalize_request = JobPostingWorkerFinalizeRequest(
-                taskId=message.taskId,
-                userId=message.userId,
+                generated = self._build_low_confidence_generated(extracted)
+            else:
+                generated = await self._openai_worker.generate_async(extracted, classification)
+            finalize_request = self._build_finalize_request(
+                message,
                 extracted=extracted,
                 candidates=candidates,
                 classification=classification,
@@ -309,6 +249,17 @@ class JobPostingTaskProcessor:
                 retry_count=message.retryCount,
             )
             delivery_started_at = monotonic()
+            delivery_message = (
+                "저신뢰도 분기 finalize 전달을 시작합니다."
+                if classification.confidence < settings.job_posting_confidence_threshold
+                else "job posting finalize 전달을 시작합니다."
+            )
+            log_info(
+                logger,
+                "worker.delivery.started",
+                delivery_message,
+                deliveryKind=pending_entry.deliveryKind,
+            )
             delivered = await self._delivery_service.deliver_pending_entry_async(
                 pending_entry,
                 retry_count=message.retryCount,
@@ -321,6 +272,7 @@ class JobPostingTaskProcessor:
                     "worker.delivery.deferred",
                     "job posting finalize 전달이 보류되어 recovery spool에 남겼습니다.",
                     deliveryKind=pending_entry.deliveryKind,
+                    confidence=classification.confidence,
                     taskProcessingLatencyMs=self._elapsed_millis(task_started_at),
                     finalizeDeliveryLatencyMs=finalize_delivery_latency_ms,
                 )
@@ -329,12 +281,41 @@ class JobPostingTaskProcessor:
                 logger,
                 "worker.task.completed",
                 "job posting 작업이 완료되었습니다.",
+                confidence=classification.confidence,
                 taskProcessingLatencyMs=self._elapsed_millis(task_started_at),
                 contextFetchLatencyMs=context_fetch_latency_ms,
                 candidateFetchLatencyMs=candidate_fetch_latency_ms,
                 resultStoreLatencyMs=result_store_latency_ms,
                 finalizeDeliveryLatencyMs=finalize_delivery_latency_ms,
             )
+
+    def _build_finalize_request(
+        self,
+        message: JobPostingIngestTaskMessage,
+        *,
+        extracted: JobPostingExtractResponse,
+        candidates: list[JobPostingClassificationCandidateResponse],
+        classification: JobPostingClassificationResultResponse,
+        generated: JobPostingGenerateResponse,
+    ) -> JobPostingWorkerFinalizeRequest:
+        return JobPostingWorkerFinalizeRequest(
+            taskId=message.taskId,
+            userId=message.userId,
+            extracted=extracted,
+            candidates=candidates,
+            classification=classification,
+            generated=generated,
+        )
+
+    def _build_low_confidence_generated(self, extracted: JobPostingExtractResponse) -> JobPostingGenerateResponse:
+        return JobPostingGenerateResponse(
+            companyName=extracted.companyName,
+            jobTitle=extracted.jobTitle,
+            task=extracted.task,
+            requirements=extracted.requirements,
+            preferredQualifications=extracted.preferredQualifications,
+            summary="분류 confidence가 낮아 finalize 단계에서 no-op 처리 가능한 canonical payload를 전달합니다.",
+        )
 
     def _normalize_classification(
         self,

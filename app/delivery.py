@@ -79,14 +79,13 @@ class WorkerDeliveryService:
         message: JobPostingIngestTaskMessage,
         result: JobPostingIngestResponse,
     ) -> None:
-        response = self._run_api_call_with_retry(
+        # Legacy compatibility only. The canonical job-posting flow is result -> finalize.
+        self._run_api_call_with_retry(
             operation_name="job posting complete",
             task_id=message.taskId,
             retry_count=message.retryCount,
             action=lambda: self._api_client.complete_task(message.taskId, result),
         )
-        if response is None:
-            raise RetryableWorkerError("job posting complete 응답이 없습니다.")
 
     async def store_job_posting_result_async(
         self,
@@ -124,14 +123,13 @@ class WorkerDeliveryService:
         message: JobPostingIngestTaskMessage,
         result: JobPostingIngestResponse,
     ) -> None:
-        response = await self._run_api_call_with_retry_async(
+        # Legacy compatibility only. The canonical job-posting flow is result -> finalize.
+        await self._run_api_call_with_retry_async(
             operation_name="job posting complete",
             task_id=message.taskId,
             retry_count=message.retryCount,
             action=lambda: self._api_client.complete_task_async(message.taskId, result),
         )
-        if response is None:
-            raise RetryableWorkerError("job posting complete 응답이 없습니다.")
 
     def enqueue_pending_delivery(
         self,
