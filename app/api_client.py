@@ -777,7 +777,7 @@ class SpringWorkerApiClient:
         try:
             return adapter.validate_python(parsed_payload)
         except ValidationError as exc:
-            raise RetryableWorkerError(f"Spring API stored result payload 스키마 검증 실패: {exc}") from exc
+            raise NonRetryableWorkerError(f"Spring API stored result payload 스키마 검증 실패: {exc}") from exc
 
     def _elapsed_millis(self, started_at: float) -> int:
         return max(int((monotonic() - started_at) * 1000), 0)

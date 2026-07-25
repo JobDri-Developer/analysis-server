@@ -55,7 +55,7 @@ flowchart LR
 
 ### 3.2 워커는 어떻게 구독하나요?
 
-워커 시작 시 [`app/consumer.py`](/Users/shinae/Desktop/study/analysis-server/app/consumer.py) 의 `RabbitMqConsumer.start()`가 실행되고, 내부 async runtime이 [`app/async_runtime.py`](/Users/shinae/Desktop/study/analysis-server/app/async_runtime.py) 를 통해 다음 두 큐를 비동기로 구독합니다.
+워커 시작 시 [`app/consumer.py`](app/consumer.py) 의 `RabbitMqConsumer.start()`가 실행되고, 내부 async runtime이 [`app/async_runtime.py`](app/async_runtime.py) 를 통해 다음 두 큐를 비동기로 구독합니다.
 
 - `APP_WORKER_JOB_POSTING_QUEUE`
 - `APP_WORKER_ANALYSIS_QUEUE`
@@ -68,7 +68,7 @@ RabbitMQ 연결은 `aio-pika` 기반이며, 채널 QoS `prefetch_count=WORKER_PR
 - `WORKER_ANALYSIS_CONCURRENCY_LIMIT`
 - `WORKER_JOB_POSTING_CONCURRENCY_LIMIT`
 
-각 메시지는 공통 consumer가 task type별 processor로 dispatch하고, 실제 동시 처리 슬롯은 [`app/concurrency.py`](/Users/shinae/Desktop/study/analysis-server/app/concurrency.py) 의 limiter가 제어합니다. 이 구조 덕분에 `analysis` 적체가 `jobposting` 전체를 막지 않도록 제한값을 분리해 운영할 수 있습니다.
+각 메시지는 공통 consumer가 task type별 processor로 dispatch하고, 실제 동시 처리 슬롯은 [`app/concurrency.py`](app/concurrency.py) 의 limiter가 제어합니다. 이 구조 덕분에 `analysis` 적체가 `jobposting` 전체를 막지 않도록 제한값을 분리해 운영할 수 있습니다.
 
 ### 3.3 워커가 발행하는 메시지도 있나요?
 
@@ -145,7 +145,7 @@ RabbitMQ 연결은 `aio-pika` 기반이며, 채널 QoS `prefetch_count=WORKER_PR
 }
 ```
 
-스키마 원본은 [`app/schemas.py`](/Users/shinae/Desktop/study/analysis-server/app/schemas.py) 에 정의되어 있습니다.
+스키마 원본은 [`app/schemas.py`](app/schemas.py) 에 정의되어 있습니다.
 
 ## 6. 재시도, DLQ, 복구 전략
 
@@ -184,8 +184,8 @@ OpenAI 호출은 성공했지만 Spring 내부 API로 최종 완료 콜백을 �
 
 관련 구현은 다음 파일에 있습니다.
 
-- [`app/recovery.py`](/Users/shinae/Desktop/study/analysis-server/app/recovery.py)
-- [`tests/test_recovery_flow.py`](/Users/shinae/Desktop/study/analysis-server/tests/test_recovery_flow.py)
+- [`app/recovery.py`](app/recovery.py)
+- [`tests/test_recovery_flow.py`](tests/test_recovery_flow.py)
 
 ## 7. 내부 API 연동 포인트
 
@@ -214,13 +214,13 @@ OpenAI 호출은 성공했지만 Spring 내부 API로 최종 완료 콜백을 �
 - `POST /api/internal/worker/analysis/tasks/{taskId}/failed`
 - `GET /api/internal/worker/analysis/tasks/{taskId}`
 
-구현은 [`app/api_client.py`](/Users/shinae/Desktop/study/analysis-server/app/api_client.py) 에 있으며, 현재는 sync 메서드와 `httpx.AsyncClient` 기반 async 메서드를 함께 제공합니다.
+구현은 [`app/api_client.py`](app/api_client.py) 에 있으며, 현재는 sync 메서드와 `httpx.AsyncClient` 기반 async 메서드를 함께 제공합니다.
 
 ## 8. OpenAI 처리 방식
 
 ### 8.1 채용 공고 작업
 
-[`app/openai_client.py`](/Users/shinae/Desktop/study/analysis-server/app/openai_client.py) 의 `JobPostingOpenAiWorker` 가 아래 3단계를 담당합니다.
+[`app/openai_client.py`](app/openai_client.py) 의 `JobPostingOpenAiWorker` 가 아래 3단계를 담당합니다.
 
 1. `extract`
    공고 텍스트 또는 이미지에서 구조화 정보 추출
@@ -276,7 +276,7 @@ docs/
 - Spring 내부 worker API 접근 가능
 - OpenAI API 키
 
-이 레포는 [`Dockerfile`](/Users/shinae/Desktop/study/analysis-server/Dockerfile) 기준으로 Python 3.12 환경에서 실행됩니다.
+이 레포는 [`Dockerfile`](Dockerfile) 기준으로 Python 3.12 환경에서 실행됩니다.
 
 ### 10.1 로컬 설치
 
@@ -316,7 +316,7 @@ WORKER_ANALYSIS_CONCURRENCY_LIMIT=1
 WORKER_JOB_POSTING_CONCURRENCY_LIMIT=1
 ```
 
-전체 목록은 [`app/config.py`](/Users/shinae/Desktop/study/analysis-server/app/config.py) 와 [`deploy/docker-compose.worker.prod.yml`](/Users/shinae/Desktop/study/analysis-server/deploy/docker-compose.worker.prod.yml) 를 참고하면 됩니다.
+전체 목록은 [`app/config.py`](app/config.py) 와 [`deploy/docker-compose.worker.prod.yml`](deploy/docker-compose.worker.prod.yml) 를 참고하면 됩니다.
 
 ### 10.3 워커 실행
 
@@ -333,18 +333,18 @@ FastAPI 앱 startup에서 RabbitMQ consumer도 함께 시작되므로, 별도 �
 
 ## 11. Docker 배포
 
-이미지는 [`Dockerfile`](/Users/shinae/Desktop/study/analysis-server/Dockerfile) 기준으로 빌드되며 기본 실행 명령은 아래와 같습니다.
+이미지는 [`Dockerfile`](Dockerfile) 기준으로 빌드되며 기본 실행 명령은 아래와 같습니다.
 
 ```dockerfile
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-운영 배포 예시는 [`deploy/docker-compose.worker.prod.yml`](/Users/shinae/Desktop/study/analysis-server/deploy/docker-compose.worker.prod.yml) 에 있습니다.
+운영 배포 예시는 [`deploy/docker-compose.worker.prod.yml`](deploy/docker-compose.worker.prod.yml) 에 있습니다.
 
 상세 운영 문서는 아래 파일을 참고하세요.
 
-- [`docs/BACKEND_SERVER_DEPLOY.md`](/Users/shinae/Desktop/study/analysis-server/docs/BACKEND_SERVER_DEPLOY.md)
-- [`docs/RENDER_DEPLOY_CHECKLIST.md`](/Users/shinae/Desktop/study/analysis-server/docs/RENDER_DEPLOY_CHECKLIST.md)
+- [`docs/BACKEND_SERVER_DEPLOY.md`](docs/BACKEND_SERVER_DEPLOY.md)
+- [`docs/RENDER_DEPLOY_CHECKLIST.md`](docs/RENDER_DEPLOY_CHECKLIST.md)
 
 ## 12. 로그와 관찰 포인트
 

@@ -18,6 +18,7 @@ from app.schemas import (
     AnalysisWorkerRunningRequest,
     JobPostingClassificationCandidateResponse,
     JobPostingClassificationResultResponse,
+    JobPostingExtractResponse,
     JobPostingGenerateResponse,
     JobPostingIngestResponse,
     JobPostingIngestTaskMessage,

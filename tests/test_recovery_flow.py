@@ -531,6 +531,15 @@ class RecoveryFlowTests(unittest.TestCase):
         with self.assertRaises(NonRetryableWorkerError):
             client.store_analysis_result("task-1", request)
 
+    def test_parse_json_payload_validation_error_is_non_retryable(self) -> None:
+        client = SpringWorkerApiClient()
+
+        with self.assertRaises(NonRetryableWorkerError):
+            client._parse_json_payload(
+                '{"userId":"oops","result":{"taskId":"task-1","userId":1,"extracted":{},"candidates":[],"classification":{},"generated":{}}}',
+                JobPostingWorkerResultStoreRequest,
+            )
+
     def test_legacy_job_posting_complete_accepts_noop_success_response(self) -> None:
         client = SpringWorkerApiClient()
         client._session.post = lambda *args, **kwargs: FakeResponse(

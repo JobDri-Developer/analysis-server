@@ -24,6 +24,8 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+_MESSAGE_DRAIN_TIMEOUT_SECONDS = 30
+_TASK_TYPE_LIMIT_REQUEUE_DELAY_SECONDS = 0.25
 
 
 class AsyncConsumerRuntime:
@@ -34,6 +36,7 @@ class AsyncConsumerRuntime:
         self._connection = None
         self._channel = None
         self._recovery_task: asyncio.Task[None] | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._message_tasks: set[asyncio.Task[None]] = set()
         self._consumer_tags: list[tuple[Any, str]] = []
 
@@ -48,9 +51,9 @@ class AsyncConsumerRuntime:
     def stop(self) -> None:
         self._consumer._stop_event.set()
         if self._loop and self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._shutdown_async(), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._shutdown_once_async(), self._loop)
             try:
-                future.result(timeout=5)
+                future.result(timeout=_MESSAGE_DRAIN_TIMEOUT_SECONDS + 5)
             except Exception:
                 pass
 
@@ -91,37 +94,46 @@ class AsyncConsumerRuntime:
     async def _consume_until_stopped(self) -> None:
         import aio_pika
 
-        self._connection = await aio_pika.connect_robust(
-            host=settings.rabbitmq_host,
-            port=settings.rabbitmq_port,
-            login=settings.rabbitmq_username,
-            password=settings.rabbitmq_password,
-            virtualhost=settings.rabbitmq_vhost,
-            heartbeat=30,
-        )
-        self._channel = await self._connection.channel(publisher_confirms=True)
-        await self._channel.set_qos(prefetch_count=settings.rabbitmq_prefetch_count)
-        await self._recover_pending_deliveries_async()
-
-        job_queue = await self._channel.declare_queue(settings.rabbitmq_queue, passive=True)
-        analysis_queue = await self._channel.declare_queue(settings.analysis_rabbitmq_queue, passive=True)
-        job_tag = await job_queue.consume(self._on_incoming_message)
-        analysis_tag = await analysis_queue.consume(self._on_incoming_message)
-        self._consumer_tags = [(job_queue, job_tag), (analysis_queue, analysis_tag)]
-
-        log_info(
-            logger,
-            "worker.consumer.started",
-            "RabbitMQ consumer를 시작합니다.",
-            queues=[settings.rabbitmq_queue, settings.analysis_rabbitmq_queue],
-            prefetchCount=settings.rabbitmq_prefetch_count,
-        )
-
         try:
+            self._connection = await aio_pika.connect_robust(
+                host=settings.rabbitmq_host,
+                port=settings.rabbitmq_port,
+                login=settings.rabbitmq_username,
+                password=settings.rabbitmq_password,
+                virtualhost=settings.rabbitmq_vhost,
+                heartbeat=30,
+            )
+            self._channel = await self._connection.channel(publisher_confirms=True)
+            await self._channel.set_qos(prefetch_count=settings.rabbitmq_prefetch_count)
+            await self._recover_pending_deliveries_async()
+
+            job_queue = await self._channel.declare_queue(settings.rabbitmq_queue, passive=True)
+            analysis_queue = await self._channel.declare_queue(settings.analysis_rabbitmq_queue, passive=True)
+            job_tag = await job_queue.consume(self._on_incoming_message)
+            analysis_tag = await analysis_queue.consume(self._on_incoming_message)
+            self._consumer_tags = [(job_queue, job_tag), (analysis_queue, analysis_tag)]
+
+            log_info(
+                logger,
+                "worker.consumer.started",
+                "RabbitMQ consumer를 시작합니다.",
+                queues=[settings.rabbitmq_queue, settings.analysis_rabbitmq_queue],
+                prefetchCount=settings.rabbitmq_prefetch_count,
+            )
+
             while not self._consumer._stop_event.is_set():
                 await asyncio.sleep(0.5)
         finally:
-            await self._shutdown_async()
+            await self._shutdown_once_async()
+
+    async def _shutdown_once_async(self) -> None:
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._shutdown_async())
+        try:
+            await self._shutdown_task
+        finally:
+            if self._shutdown_task is not None and self._shutdown_task.done():
+                self._shutdown_task = None
 
     async def _shutdown_async(self) -> None:
         for queue, tag in self._consumer_tags:
@@ -132,23 +144,25 @@ class AsyncConsumerRuntime:
         self._consumer_tags.clear()
 
         if self._message_tasks:
-            done, pending = await asyncio.wait(self._message_tasks, timeout=30)
+            done, pending = await asyncio.wait(self._message_tasks, timeout=_MESSAGE_DRAIN_TIMEOUT_SECONDS)
             for task in pending:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            self._message_tasks = set(done)
+            self._message_tasks.clear()
 
         if self._channel is not None and not getattr(self._channel, "is_closed", True):
             try:
                 await self._channel.close()
             except Exception:
                 pass
+        self._channel = None
         if self._connection is not None and not getattr(self._connection, "is_closed", True):
             try:
                 await self._connection.close()
             except Exception:
                 pass
+        self._connection = None
 
     async def _on_incoming_message(self, incoming_message) -> None:
         task = asyncio.create_task(self._handle_incoming_message(incoming_message))
@@ -207,6 +221,7 @@ class AsyncConsumerRuntime:
                     errorCode="TASK_TYPE_LIMIT_REACHED",
                     concurrencyLimit=self._consumer._concurrency_limiter.limit_for(message.taskType),
                 )
+                await asyncio.sleep(_TASK_TYPE_LIMIT_REQUEUE_DELAY_SECONDS)
                 await self._nack_message_async(incoming_message, requeue=True)
             self._consumer._release_inflight(message.taskId)
             return
