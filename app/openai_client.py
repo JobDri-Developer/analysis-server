@@ -57,7 +57,99 @@ def _build_async_openai_client(*, api_key: str, timeout: float):
     return AsyncOpenAI(api_key=api_key, timeout=timeout)
 
 
-class JobPostingOpenAiWorker:
+class _OpenAiWorkerBase:
+    _model: str
+    _task_type: str
+
+    def _extract_request_id(self, response_or_exc: object) -> str | None:
+        for attr_name in ("_request_id", "request_id", "id"):
+            value = getattr(response_or_exc, attr_name, None)
+            if isinstance(value, str) and value:
+                return value
+
+        response = getattr(response_or_exc, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if headers:
+                request_id = headers.get("x-request-id") or headers.get("request-id")
+                if request_id:
+                    return request_id
+        return None
+
+    def _elapsed_millis(self, started_at: float) -> int:
+        return max(int((monotonic() - started_at) * 1000), 0)
+
+    def _elapsed_seconds(self, started_at: float) -> float:
+        return max(monotonic() - started_at, 0.0)
+
+    def _log_openai_failure(
+        self,
+        event_prefix: str,
+        started_at: float,
+        exc: Exception,
+        *,
+        operation: str | None = None,
+    ) -> None:
+        log_kwargs = {
+            "model": self._model,
+            "latencyMs": self._elapsed_millis(started_at),
+            "openaiRequestId": self._extract_request_id(exc),
+            "errorCode": classify_openai_failure(exc).value,
+            "error": str(exc),
+        }
+        if operation is not None:
+            log_kwargs["operation"] = operation
+        log_warning(
+            logger,
+            f"{event_prefix}.failed",
+            "OpenAI 호출이 실패했습니다.",
+            **log_kwargs,
+        )
+
+    def _raise_create_response_error(
+        self,
+        *,
+        operation: str,
+        event_prefix: str,
+        started_at: float,
+        exc: Exception,
+        event_operation: str | None = None,
+    ) -> None:
+        failure_reason = classify_openai_failure(exc)
+        increment_llm_request_error(self._task_type, operation, failure_reason.value)
+        self._log_openai_failure(event_prefix, started_at, exc, operation=event_operation)
+        observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+        request_id = self._extract_request_id(exc)
+        message = self._format_create_response_error_message(failure_reason, operation, exc)
+
+        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
+            raise NonRetryableWorkerError(
+                message,
+                failure_reason=failure_reason.value,
+                openai_request_id=request_id,
+            ) from exc
+        raise RetryableWorkerError(
+            message,
+            failure_reason=failure_reason.value,
+            openai_request_id=request_id,
+        ) from exc
+
+    def _format_create_response_error_message(
+        self,
+        failure_reason: FailureReasonCode,
+        operation: str,
+        exc: Exception,
+    ) -> str:
+        if failure_reason == FailureReasonCode.RATE_LIMIT:
+            return f"OpenAI {operation} rate limit 발생: {exc}"
+        if failure_reason == FailureReasonCode.OPENAI_TIMEOUT:
+            return f"OpenAI {operation} timeout 발생: {exc}"
+        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
+            return f"OpenAI {operation} 요청 검증 실패: {exc}"
+        return f"OpenAI {operation} 처리 중 알 수 없는 오류가 발생했습니다: {exc}"
+
+
+class JobPostingOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:
         timeout = _processing_sla_timeout_seconds()
         self._client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
@@ -352,6 +444,12 @@ class JobPostingOpenAiWorker:
                 errorCode=FailureReasonCode.VALIDATION_ERROR.value,
                 error=str(exc),
             )
+            if not candidates:
+                raise NonRetryableWorkerError(
+                    "소분류 후보를 찾을 수 없습니다.",
+                    failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
+                    openai_request_id=self._extract_request_id(response),
+                )
             return build_job_posting_classification_fallback(candidates)
         except (RetryableWorkerError, NonRetryableWorkerError):
             observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
@@ -407,40 +505,7 @@ class JobPostingOpenAiWorker:
         )
         return result
 
-    def _extract_request_id(self, response_or_exc: object) -> str | None:
-        for attr_name in ("_request_id", "request_id", "id"):
-            value = getattr(response_or_exc, attr_name, None)
-            if isinstance(value, str) and value:
-                return value
-
-        response = getattr(response_or_exc, "response", None)
-        if response is not None:
-            headers = getattr(response, "headers", None)
-            if headers:
-                request_id = headers.get("x-request-id") or headers.get("request-id")
-                if request_id:
-                    return request_id
-        return None
-
-    def _elapsed_millis(self, started_at: float) -> int:
-        return max(int((monotonic() - started_at) * 1000), 0)
-
-    def _elapsed_seconds(self, started_at: float) -> float:
-        return max(monotonic() - started_at, 0.0)
-
-    def _log_openai_failure(self, event_prefix: str, started_at: float, exc: Exception) -> None:
-        log_warning(
-            logger,
-            f"{event_prefix}.failed",
-            "OpenAI 호출이 실패했습니다.",
-            model=self._model,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(exc),
-            errorCode=classify_openai_failure(exc).value,
-            error=str(exc),
-        )
-
-class AnalysisOpenAiWorker:
+class AnalysisOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:
         timeout = _processing_sla_timeout_seconds()
         self._client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
@@ -450,6 +515,20 @@ class AnalysisOpenAiWorker:
 
     def _build_analysis_prompt(self, context: AnalysisWorkerContextResponse) -> str:
         return build_analysis_prompt(context)
+
+    def _format_create_response_error_message(
+        self,
+        failure_reason: FailureReasonCode,
+        operation: str,
+        exc: Exception,
+    ) -> str:
+        if failure_reason == FailureReasonCode.RATE_LIMIT:
+            return f"OpenAI rate limit 발생: {exc}"
+        if failure_reason == FailureReasonCode.OPENAI_TIMEOUT:
+            return f"OpenAI timeout 발생: {exc}"
+        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
+            return f"OpenAI 입력/응답 검증 실패: {exc}"
+        return f"OpenAI 처리 중 알 수 없는 오류가 발생했습니다: {exc}"
 
     def analyze(self, context: AnalysisWorkerContextResponse) -> tuple[AnalysisLlmResponse, str | None]:
         operation = "analysis-final"
@@ -561,27 +640,6 @@ class AnalysisOpenAiWorker:
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
 
-    def _extract_request_id(self, response_or_exc: object) -> str | None:
-        for attr_name in ("_request_id", "request_id", "id"):
-            value = getattr(response_or_exc, attr_name, None)
-            if isinstance(value, str) and value:
-                return value
-
-        response = getattr(response_or_exc, "response", None)
-        if response is not None:
-            headers = getattr(response, "headers", None)
-            if headers:
-                request_id = headers.get("x-request-id") or headers.get("request-id")
-                if request_id:
-                    return request_id
-        return None
-
-    def _elapsed_millis(self, started_at: float) -> int:
-        return max(int((monotonic() - started_at) * 1000), 0)
-
-    def _elapsed_seconds(self, started_at: float) -> float:
-        return max(monotonic() - started_at, 0.0)
-
     def _extract_usage_fields(self, response: object) -> dict[str, int]:
         usage = getattr(response, "usage", None)
         if usage is None:
@@ -621,62 +679,3 @@ class AnalysisOpenAiWorker:
         if isinstance(source, dict):
             return source.get(key)
         return getattr(source, key, None)
-
-    def _log_openai_failure(
-        self,
-        event_prefix: str,
-        started_at: float,
-        exc: Exception,
-        *,
-        operation: str | None = None,
-    ) -> None:
-        log_warning(
-            logger,
-            f"{event_prefix}.failed",
-            "OpenAI 호출이 실패했습니다.",
-            model=self._model,
-            operation=operation,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(exc),
-            errorCode=classify_openai_failure(exc).value,
-            error=str(exc),
-        )
-
-    def _raise_create_response_error(
-        self,
-        *,
-        operation: str,
-        event_prefix: str,
-        started_at: float,
-        exc: Exception,
-        event_operation: str | None = None,
-    ) -> None:
-        failure_reason = classify_openai_failure(exc)
-        increment_llm_request_error(self._task_type, operation, failure_reason.value)
-        self._log_openai_failure(event_prefix, started_at, exc, operation=event_operation)
-        observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-        request_id = self._extract_request_id(exc)
-
-        if failure_reason == FailureReasonCode.RATE_LIMIT:
-            raise RetryableWorkerError(
-                f"OpenAI rate limit 발생: {exc}",
-                failure_reason=failure_reason.value,
-                openai_request_id=request_id,
-            ) from exc
-        if failure_reason == FailureReasonCode.OPENAI_TIMEOUT:
-            raise RetryableWorkerError(
-                f"OpenAI timeout 발생: {exc}",
-                failure_reason=failure_reason.value,
-                openai_request_id=request_id,
-            ) from exc
-        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
-            raise NonRetryableWorkerError(
-                f"OpenAI 입력/응답 검증 실패: {exc}",
-                failure_reason=failure_reason.value,
-                openai_request_id=request_id,
-            ) from exc
-        raise RetryableWorkerError(
-            f"OpenAI 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
-            failure_reason=failure_reason.value,
-            openai_request_id=request_id,
-        ) from exc

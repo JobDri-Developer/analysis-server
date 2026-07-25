@@ -297,6 +297,92 @@ class PrometheusMetricsTests(unittest.TestCase):
         self.assertEqual(fallback_after, fallback_before + 1.0)
         self.assertEqual(error_after, error_before + 1.0)
 
+    def test_job_posting_classify_fallback_with_empty_candidates_raises_validation_error(self) -> None:
+        worker = JobPostingOpenAiWorker.__new__(JobPostingOpenAiWorker)
+        worker._task_type = "JOB_POSTING_INGEST"
+        worker._model = "test-model"
+        worker._create_response = lambda **_kwargs: types.SimpleNamespace(output_text='{"reason":"bad"}')  # type: ignore[method-assign]
+
+        fallback_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "outcome": "fallback",
+        }
+        error_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "error_type": "validation_error",
+        }
+        fallback_before = _sample_value("llm_request_duration_seconds_count", fallback_labels)
+        error_before = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        with self.assertRaises(NonRetryableWorkerError) as cm:
+            worker.classify(
+                JobPostingExtractResponse(
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    rawText="raw",
+                    confidence=0.9,
+                ),
+                [],
+            )
+
+        fallback_after = _sample_value("llm_request_duration_seconds_count", fallback_labels)
+        error_after = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        self.assertEqual(cm.exception.failure_reason, "VALIDATION_ERROR")
+        self.assertEqual(fallback_after, fallback_before + 1.0)
+        self.assertEqual(error_after, error_before + 1.0)
+
+    def test_job_posting_classify_async_fallback_with_empty_candidates_raises_validation_error(self) -> None:
+        worker = JobPostingOpenAiWorker.__new__(JobPostingOpenAiWorker)
+        worker._task_type = "JOB_POSTING_INGEST"
+        worker._model = "test-model"
+        worker._async_client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(
+                create=AsyncMock(return_value=types.SimpleNamespace(output_text='{"reason":"bad"}'))
+            )
+        )
+
+        fallback_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "outcome": "fallback",
+        }
+        error_labels = {
+            "task_type": "jobposting",
+            "operation": "job-posting-classify",
+            "error_type": "validation_error",
+        }
+        fallback_before = _sample_value("llm_request_duration_seconds_count", fallback_labels)
+        error_before = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        with self.assertRaises(NonRetryableWorkerError) as cm:
+            asyncio.run(
+                worker.classify_async(
+                    JobPostingExtractResponse(
+                        companyName="JobDri",
+                        jobTitle="Backend Engineer",
+                        task="Build APIs",
+                        requirements="Python",
+                        preferredQualifications="Testing",
+                        rawText="raw",
+                        confidence=0.9,
+                    ),
+                    [],
+                )
+            )
+
+        fallback_after = _sample_value("llm_request_duration_seconds_count", fallback_labels)
+        error_after = _sample_value("worker_llm_request_errors_total", error_labels)
+
+        self.assertEqual(cm.exception.failure_reason, "VALIDATION_ERROR")
+        self.assertEqual(fallback_after, fallback_before + 1.0)
+        self.assertEqual(error_after, error_before + 1.0)
+
     def test_job_posting_generate_fallback_records_fallback_llm_outcome(self) -> None:
         worker = JobPostingOpenAiWorker.__new__(JobPostingOpenAiWorker)
         worker._task_type = "JOB_POSTING_INGEST"

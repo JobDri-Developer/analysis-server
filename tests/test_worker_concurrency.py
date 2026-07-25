@@ -281,13 +281,12 @@ class WorkerConcurrencyTests(unittest.TestCase):
 
     def test_settings_reject_zero_prefetch_count(self) -> None:
         for invalid_value in (0, -1):
-            with self.subTest(prefetch_count=invalid_value):
-                with self.assertRaises(ValidationError):
-                    Settings(
-                        APP_WORKER_INTERNAL_API_KEY="test-internal-key",
-                        OPENAI_API_KEY="test-openai-key",
-                        WORKER_PREFETCH_COUNT=invalid_value,
-                    )
+            with self.subTest(prefetch_count=invalid_value), self.assertRaises(ValidationError):
+                Settings(
+                    APP_WORKER_INTERNAL_API_KEY="test-internal-key",
+                    OPENAI_API_KEY="test-openai-key",
+                    WORKER_PREFETCH_COUNT=invalid_value,
+                )
 
 
 if __name__ == "__main__":
