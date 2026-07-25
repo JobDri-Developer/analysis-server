@@ -218,12 +218,65 @@ class WorkerConcurrencyTests(unittest.TestCase):
         release_mock.assert_called_once_with("task-1")
         lease.release()
 
+    def test_async_runtime_waits_before_requeue_when_task_is_already_inflight(self) -> None:
+        consumer = RabbitMqConsumer(
+            api_client=MagicMock(),
+            openai_worker=MagicMock(),
+            analysis_openai_worker=MagicMock(),
+            recovery_store=MagicMock(),
+            terminal_message_store=MagicMock(),
+            sleep_fn=lambda _seconds: None,
+        )
+        runtime = AsyncConsumerRuntime(consumer)
+        message = JobPostingIngestTaskMessage(
+            messageId="message-1",
+            requestId="request-1",
+            taskType="JOB_POSTING_INGEST",
+            taskId="task-1",
+            userId=1,
+            rawText="hello",
+            retryCount=0,
+            maxRetryCount=3,
+            submittedAt=datetime.fromisoformat("2026-07-21T00:00:00+00:00"),
+        )
+        incoming_message = SimpleNamespace(
+            body=json.dumps(message.model_dump(mode="json")).encode("utf-8"),
+            headers={},
+            message_id=message.messageId,
+            content_type="application/json",
+            delivery_tag=1,
+            redelivered=True,
+            ack=AsyncMock(),
+            nack=AsyncMock(),
+        )
+
+        async def fake_sleep(_seconds: float) -> None:
+            return None
+
+        with patch.object(consumer, "_register_inflight", return_value=False), patch(
+            "app.async_runtime.asyncio.sleep",
+            side_effect=fake_sleep,
+        ) as sleep_mock:
+            asyncio.run(runtime._handle_incoming_message(incoming_message))
+
+        incoming_message.nack.assert_awaited_once_with(requeue=True)
+        sleep_mock.assert_called_once()
+        incoming_message.ack.assert_not_called()
+
     def test_settings_reject_zero_concurrency_limit(self) -> None:
         with self.assertRaises(ValidationError):
             Settings(
                 APP_WORKER_INTERNAL_API_KEY="test-internal-key",
                 OPENAI_API_KEY="test-openai-key",
                 WORKER_DEFAULT_CONCURRENCY_LIMIT=0,
+            )
+
+    def test_settings_reject_zero_prefetch_count(self) -> None:
+        with self.assertRaises(ValidationError):
+            Settings(
+                APP_WORKER_INTERNAL_API_KEY="test-internal-key",
+                OPENAI_API_KEY="test-openai-key",
+                WORKER_PREFETCH_COUNT=0,
             )
 
 

@@ -205,6 +205,7 @@ class AsyncConsumerRuntime:
                     failureReason="TASK_ALREADY_INFLIGHT",
                     errorCode="TASK_ALREADY_INFLIGHT",
                 )
+                await asyncio.sleep(_TASK_TYPE_LIMIT_REQUEUE_DELAY_SECONDS)
                 await self._nack_message_async(incoming_message, requeue=True)
             return
 

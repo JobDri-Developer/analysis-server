@@ -31,7 +31,7 @@ class Settings(BaseSettings):
         default="jobdri.analysis.execute.dlq",
         alias="APP_WORKER_ANALYSIS_DLQ",
     )
-    rabbitmq_prefetch_count: int = Field(default=1, alias="WORKER_PREFETCH_COUNT")
+    rabbitmq_prefetch_count: int = Field(default=1, ge=1, alias="WORKER_PREFETCH_COUNT")
     worker_default_concurrency_limit: int = Field(default=1, ge=1, alias="WORKER_DEFAULT_CONCURRENCY_LIMIT")
     worker_analysis_concurrency_limit: int = Field(default=1, ge=1, alias="WORKER_ANALYSIS_CONCURRENCY_LIMIT")
     worker_job_posting_concurrency_limit: int = Field(default=1, ge=1, alias="WORKER_JOB_POSTING_CONCURRENCY_LIMIT")

@@ -15,6 +15,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY
 os.environ.setdefault("APP_WORKER_INTERNAL_API_KEY", "test-internal-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+import app.openai_client as openai_client_module
 from app.api_client import SpringWorkerApiClient
 from app.consumer import RabbitMqConsumer
 from app.main import metrics
@@ -414,6 +415,82 @@ class PrometheusMetricsTests(unittest.TestCase):
             )
 
         self.assertEqual(cm.exception.failure_reason, "VALIDATION_ERROR")
+
+    def test_analysis_rate_limit_status_error_is_retryable(self) -> None:
+        worker = AnalysisOpenAiWorker.__new__(AnalysisOpenAiWorker)
+        worker._task_type = "ANALYSIS"
+        worker._model = "test-model"
+
+        status_error = APIStatusError.__new__(APIStatusError)
+        Exception.__init__(status_error, "rate limited")
+        status_error.status_code = 429
+        status_error.response = SimpleNamespace(headers={})
+
+        worker._client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=lambda **_kwargs: (_ for _ in ()).throw(status_error))
+        )
+
+        with self.assertRaises(RetryableWorkerError) as cm:
+            worker.analyze(
+                AnalysisWorkerContextResponse(
+                    userId=1,
+                    mockApplyId=1,
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    bigClassificationName="Engineering",
+                    middleClassificationName="Server",
+                    detailClassificationName="Backend",
+                    questions=[],
+                )
+            )
+
+        self.assertEqual(cm.exception.failure_reason, "RATE_LIMIT")
+
+    def test_analysis_server_status_error_is_retryable_internal_error(self) -> None:
+        worker = AnalysisOpenAiWorker.__new__(AnalysisOpenAiWorker)
+        worker._task_type = "ANALYSIS"
+        worker._model = "test-model"
+
+        status_error = APIStatusError.__new__(APIStatusError)
+        Exception.__init__(status_error, "server error")
+        status_error.status_code = 503
+        status_error.response = SimpleNamespace(headers={})
+
+        worker._client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=lambda **_kwargs: (_ for _ in ()).throw(status_error))
+        )
+
+        with self.assertRaises(RetryableWorkerError) as cm:
+            worker.analyze(
+                AnalysisWorkerContextResponse(
+                    userId=1,
+                    mockApplyId=1,
+                    companyName="JobDri",
+                    jobTitle="Backend Engineer",
+                    task="Build APIs",
+                    requirements="Python",
+                    preferredQualifications="Testing",
+                    bigClassificationName="Engineering",
+                    middleClassificationName="Server",
+                    detailClassificationName="Backend",
+                    questions=[],
+                )
+            )
+
+        self.assertEqual(cm.exception.failure_reason, "INTERNAL_ERROR")
+
+    def test_openai_clients_use_explicit_timeout_from_processing_sla(self) -> None:
+        with patch.object(openai_client_module.settings, "analysis_queue_timeout_millis", 12345), patch(
+            "app.openai_client.OpenAI",
+        ) as openai_mock, patch("app.openai_client.AsyncOpenAI") as async_openai_mock:
+            JobPostingOpenAiWorker()
+            AnalysisOpenAiWorker()
+
+        openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345)
+        async_openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345)
 
     def test_analysis_validation_error_goes_to_non_retryable_path(self) -> None:
         consumer = RabbitMqConsumer(
