@@ -55,12 +55,20 @@ flowchart LR
 
 ### 3.2 워커는 어떻게 구독하나요?
 
-워커 시작 시 [`app/consumer.py`](/Users/shinae/Desktop/study/analysis-server/app/consumer.py) 의 `RabbitMqConsumer.start()`가 실행되고, 내부에서 다음 두 큐를 `basic_consume`으로 구독합니다.
+워커 시작 시 [`app/consumer.py`](app/consumer.py) 의 `RabbitMqConsumer.start()`가 실행되고, 내부 async runtime이 [`app/async_runtime.py`](app/async_runtime.py) 를 통해 다음 두 큐를 비동기로 구독합니다.
 
 - `APP_WORKER_JOB_POSTING_QUEUE`
 - `APP_WORKER_ANALYSIS_QUEUE`
 
-또한 `basic_qos(prefetch_count=WORKER_PREFETCH_COUNT)`를 사용해 한 번에 가져올 메시지 수를 제한합니다. 기본값은 `1`입니다.
+RabbitMQ 연결은 `aio-pika` 기반이며, 채널 QoS `prefetch_count=WORKER_PREFETCH_COUNT` 를 유지합니다. 즉, MQ fetch 자체와 내부 HTTP/OpenAI I/O가 같은 event loop에서 겹쳐 처리될 수 있습니다.
+
+또한 task type별 bounded concurrency를 함께 사용합니다.
+
+- `WORKER_DEFAULT_CONCURRENCY_LIMIT`
+- `WORKER_ANALYSIS_CONCURRENCY_LIMIT`
+- `WORKER_JOB_POSTING_CONCURRENCY_LIMIT`
+
+각 메시지는 공통 consumer가 task type별 processor로 dispatch하고, 실제 동시 처리 슬롯은 [`app/concurrency.py`](app/concurrency.py) 의 limiter가 제어합니다. 이 구조 덕분에 `analysis` 적체가 `jobposting` 전체를 막지 않도록 제한값을 분리해 운영할 수 있습니다.
 
 ### 3.3 워커가 발행하는 메시지도 있나요?
 
@@ -137,7 +145,7 @@ flowchart LR
 }
 ```
 
-스키마 원본은 [`app/schemas.py`](/Users/shinae/Desktop/study/analysis-server/app/schemas.py) 에 정의되어 있습니다.
+스키마 원본은 [`app/schemas.py`](app/schemas.py) 에 정의되어 있습니다.
 
 ## 6. 재시도, DLQ, 복구 전략
 
@@ -176,8 +184,8 @@ OpenAI 호출은 성공했지만 Spring 내부 API로 최종 완료 콜백을 �
 
 관련 구현은 다음 파일에 있습니다.
 
-- [`app/recovery.py`](/Users/shinae/Desktop/study/analysis-server/app/recovery.py)
-- [`tests/test_recovery_flow.py`](/Users/shinae/Desktop/study/analysis-server/tests/test_recovery_flow.py)
+- [`app/recovery.py`](app/recovery.py)
+- [`tests/test_recovery_flow.py`](tests/test_recovery_flow.py)
 
 ## 7. 내부 API 연동 포인트
 
@@ -206,13 +214,13 @@ OpenAI 호출은 성공했지만 Spring 내부 API로 최종 완료 콜백을 �
 - `POST /api/internal/worker/analysis/tasks/{taskId}/failed`
 - `GET /api/internal/worker/analysis/tasks/{taskId}`
 
-구현은 [`app/api_client.py`](/Users/shinae/Desktop/study/analysis-server/app/api_client.py) 에 있습니다.
+구현은 [`app/api_client.py`](app/api_client.py) 에 있으며, 현재는 sync 메서드와 `httpx.AsyncClient` 기반 async 메서드를 함께 제공합니다.
 
 ## 8. OpenAI 처리 방식
 
 ### 8.1 채용 공고 작업
 
-[`app/openai_client.py`](/Users/shinae/Desktop/study/analysis-server/app/openai_client.py) 의 `JobPostingOpenAiWorker` 가 아래 3단계를 담당합니다.
+[`app/openai_client.py`](app/openai_client.py) 의 `JobPostingOpenAiWorker` 가 아래 3단계를 담당합니다.
 
 1. `extract`
    공고 텍스트 또는 이미지에서 구조화 정보 추출
@@ -225,6 +233,8 @@ OpenAI 호출은 성공했지만 Spring 내부 API로 최종 완료 콜백을 �
 
 `AnalysisOpenAiWorker` 가 문항별 답변과 공고 맥락을 바탕으로 종합 점수와 피드백을 생성합니다.
 
+현재 OpenAI 호출도 sync/async wrapper를 모두 가지고 있으며, 실제 consumer 경로는 async client를 사용합니다.
+
 기본 모델은 아래 환경변수로 제어됩니다.
 
 - `OPENAI_JOB_POSTING_MODEL=gpt-4o-mini`
@@ -236,13 +246,19 @@ OpenAI 호출은 성공했지만 Spring 내부 API로 최종 완료 콜백을 �
 app/
   main.py              # FastAPI 앱과 health endpoint
   worker.py            # CLI worker 진입점
-  consumer.py          # RabbitMQ consume / retry / DLQ / recovery 핵심 로직
-  api_client.py        # Spring 내부 API 클라이언트
-  openai_client.py     # OpenAI 호출 로직
+  consumer.py          # worker 조립과 공통 consume helper
+  async_runtime.py     # aio-pika 기반 async consumer runtime
+  concurrency.py       # task type별 bounded concurrency limiter
+  processors.py        # task type별 processor 분리
+  delivery.py          # result store / finalize / complete 전달 계층
+  api_client.py        # Spring 내부 API 클라이언트 (sync + async)
+  openai_client.py     # OpenAI 호출 로직 (sync + async)
+  async_utils.py       # sync/async bridge helper
   recovery.py          # recovery spool 저장/복구
   schemas.py           # 메시지/응답 스키마
   logging_utils.py     # 구조화 로그 필터
 tests/
+  test_prometheus_metrics.py
   test_recovery_flow.py
 deploy/
   docker-compose.worker.prod.yml
@@ -260,7 +276,7 @@ docs/
 - Spring 내부 worker API 접근 가능
 - OpenAI API 키
 
-이 레포는 [`Dockerfile`](/Users/shinae/Desktop/study/analysis-server/Dockerfile) 기준으로 Python 3.12 환경에서 실행됩니다.
+이 레포는 [`Dockerfile`](Dockerfile) 기준으로 Python 3.12 환경에서 실행됩니다.
 
 ### 10.1 로컬 설치
 
@@ -294,9 +310,13 @@ APP_WORKER_ANALYSIS_EXCHANGE=jobdri.worker.exchange
 APP_WORKER_ANALYSIS_QUEUE=jobdri.analysis.execute
 APP_WORKER_ANALYSIS_ROUTING_KEY=analysis.execute
 APP_WORKER_ANALYSIS_DLQ=jobdri.analysis.execute.dlq
+
+WORKER_DEFAULT_CONCURRENCY_LIMIT=1
+WORKER_ANALYSIS_CONCURRENCY_LIMIT=1
+WORKER_JOB_POSTING_CONCURRENCY_LIMIT=1
 ```
 
-전체 목록은 [`app/config.py`](/Users/shinae/Desktop/study/analysis-server/app/config.py) 와 [`deploy/docker-compose.worker.prod.yml`](/Users/shinae/Desktop/study/analysis-server/deploy/docker-compose.worker.prod.yml) 를 참고하면 됩니다.
+전체 목록은 [`app/config.py`](app/config.py) 와 [`deploy/docker-compose.worker.prod.yml`](deploy/docker-compose.worker.prod.yml) 를 참고하면 됩니다.
 
 ### 10.3 워커 실행
 
@@ -313,18 +333,18 @@ FastAPI 앱 startup에서 RabbitMQ consumer도 함께 시작되므로, 별도 �
 
 ## 11. Docker 배포
 
-이미지는 [`Dockerfile`](/Users/shinae/Desktop/study/analysis-server/Dockerfile) 기준으로 빌드되며 기본 실행 명령은 아래와 같습니다.
+이미지는 [`Dockerfile`](Dockerfile) 기준으로 빌드되며 기본 실행 명령은 아래와 같습니다.
 
 ```dockerfile
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-운영 배포 예시는 [`deploy/docker-compose.worker.prod.yml`](/Users/shinae/Desktop/study/analysis-server/deploy/docker-compose.worker.prod.yml) 에 있습니다.
+운영 배포 예시는 [`deploy/docker-compose.worker.prod.yml`](deploy/docker-compose.worker.prod.yml) 에 있습니다.
 
 상세 운영 문서는 아래 파일을 참고하세요.
 
-- [`docs/BACKEND_SERVER_DEPLOY.md`](/Users/shinae/Desktop/study/analysis-server/docs/BACKEND_SERVER_DEPLOY.md)
-- [`docs/RENDER_DEPLOY_CHECKLIST.md`](/Users/shinae/Desktop/study/analysis-server/docs/RENDER_DEPLOY_CHECKLIST.md)
+- [`docs/BACKEND_SERVER_DEPLOY.md`](docs/BACKEND_SERVER_DEPLOY.md)
+- [`docs/RENDER_DEPLOY_CHECKLIST.md`](docs/RENDER_DEPLOY_CHECKLIST.md)
 
 ## 12. 로그와 관찰 포인트
 
@@ -340,10 +360,145 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 - `Worker process started.`
 - `RabbitMQ consumer started.`
 
-## 13. 테스트
+## 13. 메트릭과 해석 기준
 
-```bash
-python3 -m unittest tests/test_recovery_flow.py
+기존 Prometheus 메트릭은 유지하면서, 2차 구현에서는 async 경로와 운영 병목을 더 직접 해석할 수 있도록 아래를 정리했습니다.
+
+- `worker_task_queue_wait_duration_seconds{task_type}`
+  큐 적체 시간을 봅니다. 현재 병목 1순위 확인용입니다.
+- `worker_task_processing_duration_seconds{task_type,outcome}`
+  worker 내부 end-to-end 처리 시간을 봅니다.
+- `llm_request_duration_seconds{task_type,operation,outcome}`
+  OpenAI 호출 latency를 봅니다.
+- `worker_internal_api_duration_seconds{task_type,endpoint,method,outcome}`
+  Spring internal API 전체 호출 시간을 봅니다.
+- `worker_context_fetch_duration_seconds{task_type,endpoint,outcome}`
+  context fetch 전용 뷰입니다.
+- `worker_callback_duration_seconds{task_type,endpoint,outcome}`
+  complete/finalize/retry/failed callback 전용 뷰입니다.
+- `worker_task_inflight{task_type}`
+  현재 동시에 처리 중인 task 수입니다.
+- `worker_task_concurrency_limit{task_type}`
+  task type별 설정 상한입니다. `inflight` 와 같이 보면 슬롯 포화 여부를 해석하기 쉽습니다.
+- `worker_task_retry_count_total{task_type,reason}`
+  retry 전환량입니다.
+
+### 13.1 에러 및 fallback 정책
+
+- analysis 응답 schema 검증 실패는 `VALIDATION_ERROR` + non-retryable로 분류합니다.
+- job posting `classify`/`generate` 의 schema 검증 실패는 fallback으로 처리하고, `llm_request_duration_seconds{outcome="fallback"}` 로 기록합니다.
+- fallback도 성공으로 섞지 않고 별도 outcome으로 유지해, success latency와 fallback latency를 분리해서 볼 수 있게 했습니다.
+- retryable / non-retryable 의미는 기존 비즈니스 계약을 유지합니다.
+  - `RATE_LIMIT`, `OPENAI_TIMEOUT`, 일반 `INTERNAL_ERROR`, Spring API transport/server error는 재시도 가능
+  - validation/parsing failure와 4xx 성격 오류는 비재시도
+
+### 13.2 Grafana / Prometheus 쿼리 예시
+
+큐 대기 p95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, task_type) (
+    rate(worker_task_queue_wait_duration_seconds_bucket[5m])
+  )
+)
 ```
 
-현재 테스트는 recovery spool 기반 재전송과 완료 콜백 복구 시나리오를 검증합니다.
+큐 대기 p99:
+
+```promql
+histogram_quantile(
+  0.99,
+  sum by (le, task_type) (
+    rate(worker_task_queue_wait_duration_seconds_bucket[5m])
+  )
+)
+```
+
+처리 시간 p95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, task_type, outcome) (
+    rate(worker_task_processing_duration_seconds_bucket[5m])
+  )
+)
+```
+
+LLM 요청 p95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, task_type, operation, outcome) (
+    rate(llm_request_duration_seconds_bucket[5m])
+  )
+)
+```
+
+inflight 평균:
+
+```promql
+avg_over_time(worker_task_inflight[5m])
+```
+
+inflight 최대:
+
+```promql
+max_over_time(worker_task_inflight[5m])
+```
+
+설정 상한 대비 사용량:
+
+```promql
+worker_task_inflight / clamp_min(worker_task_concurrency_limit, 1)
+```
+
+retry rate:
+
+```promql
+sum by (task_type, reason) (
+  rate(worker_task_retry_count_total[5m])
+)
+```
+
+context fetch p95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, task_type, endpoint, outcome) (
+    rate(worker_context_fetch_duration_seconds_bucket[5m])
+  )
+)
+```
+
+callback p95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, task_type, endpoint, outcome) (
+    rate(worker_callback_duration_seconds_bucket[5m])
+  )
+)
+```
+
+## 14. 테스트
+
+```bash
+python3 -m unittest \
+  tests/test_prometheus_metrics.py \
+  tests/test_worker_concurrency.py \
+  tests/test_recovery_flow.py \
+  tests/test_observability_logging.py
+```
+
+현재 테스트는 아래를 검증합니다.
+
+- recovery spool 기반 재전송과 완료 콜백 복구
+- validation error / fallback / retry 메트릭 분류
+- task type별 inflight / concurrency metric
+- observability 로그 필드 정합성

@@ -54,6 +54,23 @@ class PendingDeliveryStore:
                 )
         return entries
 
+    def get_entry(self, task_id: str, delivery_kind: str) -> PendingDeliveryEntry | None:
+        path = self._path_for_task(task_id, delivery_kind)
+        if not path.exists():
+            return None
+
+        try:
+            return PendingDeliveryEntry.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            log_exception(
+                logger,
+                "worker.recovery.spool.read_failed",
+                "pending delivery spool 파일을 읽지 못했습니다.",
+                path=str(path),
+                errorCode="RECOVERY_SPOOL_READ_FAILED",
+            )
+            return None
+
     def _path_for(self, entry: PendingDeliveryEntry) -> Path:
         return self._path_for_task(entry.taskId, entry.deliveryKind)
 

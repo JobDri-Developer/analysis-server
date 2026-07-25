@@ -8,6 +8,28 @@ from typing import Any
 from pydantic import ValidationError
 from openai import APIConnectionError, APIStatusError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
 
+from app.async_utils import await_if_needed
+from app.error_codes import FailureReasonCode, classify_openai_failure
+from app.openai_prompts import (
+    build_analysis_prompt,
+    build_job_posting_classification_prompt,
+    build_job_posting_extract_prompt,
+    build_job_posting_generation_prompt,
+)
+from app.openai_response_parser import (
+    build_job_posting_classification_fallback,
+    build_job_posting_generate_fallback,
+    parse_analysis_response,
+    parse_job_posting_classification_response,
+    parse_job_posting_extract_response,
+    parse_job_posting_generate_response,
+)
+
+try:
+    from openai import AsyncOpenAI
+except ImportError:  # pragma: no cover - compatibility fallback for lightweight test stubs
+    AsyncOpenAI = None  # type: ignore[assignment]
+
 from app.config import settings
 from app.logging_utils import log_info, log_warning
 from app.metrics import increment_llm_request_error, observe_llm_request
@@ -25,262 +47,19 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 
-class JobPostingOpenAiWorker:
-    def __init__(self) -> None:
-        self._client = OpenAI(api_key=settings.openai_api_key)
-        self._model = settings.openai_job_posting_model
-        self._task_type = "JOB_POSTING_INGEST"
+def _processing_sla_timeout_seconds() -> float:
+    return max(settings.analysis_queue_timeout_millis / 1000, 1.0)
 
-    def extract(self, raw_text: str | None, image_url: str | None) -> JobPostingExtractResponse:
-        operation = "job-posting-extract"
-        prompt = self._build_extract_prompt(raw_text or "", image_url is not None)
-        content = [{"type": "input_text", "text": prompt}]
-        if image_url:
-            content.append({"type": "input_image", "image_url": image_url})
 
-        started_at = monotonic()
-        log_info(
-            logger,
-            "openai.extract.started",
-            "OpenAI extract 호출을 시작합니다.",
-            model=self._model,
-            hasImage=image_url is not None,
-        )
-        response = self._create_response(
-            input_payload=[{"role": "user", "content": content}],
-            temperature=0.1,
-            operation="extract",
-            event_prefix="openai.extract",
-        )
-        try:
-            payload = self._parse_json(response.output_text)
-            result = JobPostingExtractResponse.model_validate(payload)
-        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
-            log_warning(
-                logger,
-                "openai.extract.failed",
-                "OpenAI extract 응답 검증에 실패했습니다.",
-                model=self._model,
-                latencyMs=self._elapsed_millis(started_at),
-                openaiRequestId=self._extract_request_id(response),
-                errorCode="VALIDATION_ERROR",
-                error=str(exc),
-            )
-            raise NonRetryableWorkerError(
-                f"OpenAI extract 응답 검증 실패: {exc}",
-                failure_reason="VALIDATION_ERROR",
-                openai_request_id=self._extract_request_id(response),
-            ) from exc
-        except (RetryableWorkerError, NonRetryableWorkerError):
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise
-        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
-        log_info(
-            logger,
-            "openai.extract.completed",
-            "OpenAI extract 호출이 완료되었습니다.",
-            model=self._model,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(response),
-        )
-        return result
+def _build_async_openai_client(*, api_key: str, timeout: float):
+    if AsyncOpenAI is None:
+        raise RuntimeError("AsyncOpenAI client is required for worker initialization.")
+    return AsyncOpenAI(api_key=api_key, timeout=timeout)
 
-    def classify(
-        self,
-        extracted: JobPostingExtractResponse,
-        candidates: list[JobPostingClassificationCandidateResponse],
-    ) -> JobPostingClassificationResultResponse:
-        operation = "job-posting-classify"
-        prompt = self._build_classification_prompt(extracted, candidates)
-        started_at = monotonic()
-        log_info(
-            logger,
-            "openai.classify.started",
-            "OpenAI classify 호출을 시작합니다.",
-            model=self._model,
-            candidateCount=len(candidates),
-        )
-        response = self._create_response(
-            input_payload=prompt,
-            temperature=0.1,
-            operation="classify",
-            event_prefix="openai.classify",
-        )
-        try:
-            payload = self._parse_json(response.output_text)
-            result = JobPostingClassificationResultResponse.model_validate(payload)
-        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
-            log_warning(
-                logger,
-                "openai.classify.failed",
-                "OpenAI classify 응답 검증에 실패해 fallback을 사용합니다.",
-                model=self._model,
-                latencyMs=self._elapsed_millis(started_at),
-                openaiRequestId=self._extract_request_id(response),
-                errorCode="VALIDATION_ERROR",
-                error=str(exc),
-            )
-            top = candidates[0]
-            return JobPostingClassificationResultResponse(
-                detailClassificationId=top.detailClassificationId,
-                detailClassificationName=top.detailClassificationName,
-                middleClassificationName=top.middleClassificationName,
-                bigClassificationName=top.bigClassificationName,
-                reason="LLM 분류 실패로 1순위 후보를 fallback으로 사용했습니다.",
-                confidence=top.score,
-            )
-        except (RetryableWorkerError, NonRetryableWorkerError):
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise
-        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
-        log_info(
-            logger,
-            "openai.classify.completed",
-            "OpenAI classify 호출이 완료되었습니다.",
-            model=self._model,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(response),
-        )
-        return result
 
-    def generate(
-        self,
-        extracted: JobPostingExtractResponse,
-        classification: JobPostingClassificationResultResponse,
-    ) -> JobPostingGenerateResponse:
-        operation = "job-posting-generate"
-        prompt = self._build_generation_prompt(extracted, classification)
-        started_at = monotonic()
-        log_info(
-            logger,
-            "openai.generate.started",
-            "OpenAI generate 호출을 시작합니다.",
-            model=self._model,
-        )
-        response = self._create_response(
-            input_payload=prompt,
-            temperature=0.7,
-            operation="generate",
-            event_prefix="openai.generate",
-        )
-        try:
-            payload = self._parse_json(response.output_text)
-            result = JobPostingGenerateResponse.model_validate(payload)
-        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
-            log_warning(
-                logger,
-                "openai.generate.failed",
-                "OpenAI generate 응답 검증에 실패해 fallback을 사용합니다.",
-                model=self._model,
-                latencyMs=self._elapsed_millis(started_at),
-                openaiRequestId=self._extract_request_id(response),
-                errorCode="VALIDATION_ERROR",
-                error=str(exc),
-            )
-            return JobPostingGenerateResponse(
-                companyName=extracted.companyName,
-                jobTitle=extracted.jobTitle,
-                task=extracted.task,
-                requirements=extracted.requirements,
-                preferredQualifications=extracted.preferredQualifications,
-                summary="생성 실패로 추출 결과를 기반으로 fallback 응답을 사용했습니다.",
-            )
-        except (RetryableWorkerError, NonRetryableWorkerError):
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise
-        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
-        log_info(
-            logger,
-            "openai.generate.completed",
-            "OpenAI generate 호출이 완료되었습니다.",
-            model=self._model,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(response),
-        )
-        return result
-
-    def _create_response(self, *, input_payload: object, temperature: float, operation: str, event_prefix: str):
-        started_at = monotonic()
-        try:
-            return self._client.responses.create(
-                model=self._model,
-                temperature=temperature,
-                input=input_payload,
-            )
-        except RateLimitError as exc:
-            increment_llm_request_error(self._task_type, operation, "RATE_LIMIT")
-            self._log_openai_failure(event_prefix, started_at, exc)
-            raise RetryableWorkerError(
-                f"OpenAI {operation} rate limit 발생: {exc}",
-                failure_reason="RATE_LIMIT",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-        except APITimeoutError as exc:
-            increment_llm_request_error(self._task_type, operation, "OPENAI_TIMEOUT")
-            self._log_openai_failure(event_prefix, started_at, exc)
-            raise RetryableWorkerError(
-                f"OpenAI {operation} timeout 발생: {exc}",
-                failure_reason="OPENAI_TIMEOUT",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-        except APIConnectionError as exc:
-            increment_llm_request_error(self._task_type, operation, "OPENAI_TIMEOUT")
-            self._log_openai_failure(event_prefix, started_at, exc)
-            raise RetryableWorkerError(
-                f"OpenAI {operation} connection error 발생: {exc}",
-                failure_reason="OPENAI_TIMEOUT",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-        except BadRequestError as exc:
-            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
-            self._log_openai_failure(event_prefix, started_at, exc)
-            raise NonRetryableWorkerError(
-                f"OpenAI {operation} 요청 검증 실패: {exc}",
-                failure_reason="VALIDATION_ERROR",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-        except APIStatusError as exc:
-            error_type = "RATE_LIMIT" if getattr(exc, "status_code", None) == 429 else "INTERNAL_ERROR"
-            increment_llm_request_error(self._task_type, operation, error_type)
-            self._log_openai_failure(event_prefix, started_at, exc)
-            status_code = getattr(exc, "status_code", None)
-            if status_code == 429:
-                raise RetryableWorkerError(
-                    f"OpenAI {operation} rate limit 발생: {exc}",
-                    failure_reason="RATE_LIMIT",
-                    openai_request_id=self._extract_request_id(exc),
-                ) from exc
-            if status_code is not None and status_code >= 500:
-                raise RetryableWorkerError(
-                    f"OpenAI {operation} API 상태 오류: {exc}",
-                    failure_reason="INTERNAL_ERROR",
-                    openai_request_id=self._extract_request_id(exc),
-                ) from exc
-            raise NonRetryableWorkerError(
-                f"OpenAI {operation} 요청 실패: {exc}",
-                failure_reason="VALIDATION_ERROR",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-        except Exception as exc:
-            increment_llm_request_error(self._task_type, operation, "INTERNAL_ERROR")
-            self._log_openai_failure(event_prefix, started_at, exc)
-            raise RetryableWorkerError(
-                f"OpenAI {operation} 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
-                failure_reason="INTERNAL_ERROR",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-
-    def _parse_json(self, raw_text: str) -> dict:
-        start = raw_text.find("{")
-        end = raw_text.rfind("}")
-        candidate = raw_text[start : end + 1] if start >= 0 and end >= 0 else raw_text
-        return json.loads(candidate)
+class _OpenAiWorkerBase:
+    _model: str
+    _task_type: str
 
     def _extract_request_id(self, response_or_exc: object) -> str | None:
         for attr_name in ("_request_id", "request_id", "id"):
@@ -303,123 +82,453 @@ class JobPostingOpenAiWorker:
     def _elapsed_seconds(self, started_at: float) -> float:
         return max(monotonic() - started_at, 0.0)
 
-    def _log_openai_failure(self, event_prefix: str, started_at: float, exc: Exception) -> None:
+    def _log_openai_failure(
+        self,
+        event_prefix: str,
+        started_at: float,
+        exc: Exception,
+        *,
+        operation: str | None = None,
+    ) -> None:
+        log_kwargs = {
+            "model": self._model,
+            "latencyMs": self._elapsed_millis(started_at),
+            "openaiRequestId": self._extract_request_id(exc),
+            "errorCode": classify_openai_failure(exc).value,
+            "error": str(exc),
+        }
+        if operation is not None:
+            log_kwargs["operation"] = operation
         log_warning(
             logger,
             f"{event_prefix}.failed",
             "OpenAI 호출이 실패했습니다.",
-            model=self._model,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(exc),
-            errorCode=self._derive_error_code(exc),
-            error=str(exc),
+            **log_kwargs,
         )
 
-    def _derive_error_code(self, exc: Exception) -> str:
-        if isinstance(exc, RateLimitError):
-            return "RATE_LIMIT"
-        if isinstance(exc, (APITimeoutError, APIConnectionError)):
-            return "OPENAI_TIMEOUT"
-        if isinstance(exc, (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError)):
-            return "VALIDATION_ERROR"
-        return "INTERNAL_ERROR"
+    def _raise_create_response_error(
+        self,
+        *,
+        operation: str,
+        event_prefix: str,
+        started_at: float,
+        exc: Exception,
+        event_operation: str | None = None,
+    ) -> None:
+        failure_reason = classify_openai_failure(exc)
+        increment_llm_request_error(self._task_type, operation, failure_reason.value)
+        self._log_openai_failure(event_prefix, started_at, exc, operation=event_operation)
+        observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+        request_id = self._extract_request_id(exc)
+        message = self._format_create_response_error_message(failure_reason, operation, exc)
 
-    def _build_extract_prompt(self, raw_text: str, has_image: bool) -> str:
-        return f"""
-이 {"이미지 또는 텍스트" if has_image else "텍스트"}는 채용 공고입니다.
-회사명, 직무명, 주요 업무, 자격 요건, 우대 사항을 추출해주세요.
-반드시 아래 JSON 형식만 반환하세요.
+        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
+            raise NonRetryableWorkerError(
+                message,
+                failure_reason=failure_reason.value,
+                openai_request_id=request_id,
+            ) from exc
+        raise RetryableWorkerError(
+            message,
+            failure_reason=failure_reason.value,
+            openai_request_id=request_id,
+        ) from exc
 
-{{
-  "companyName": "string",
-  "jobTitle": "string",
-  "task": "string",
-  "requirements": "string",
-  "preferredQualifications": "string",
-  "rawText": "string",
-  "confidence": 0.0
-}}
+    def _format_create_response_error_message(
+        self,
+        failure_reason: FailureReasonCode,
+        operation: str,
+        exc: Exception,
+    ) -> str:
+        if failure_reason == FailureReasonCode.RATE_LIMIT:
+            return f"OpenAI {operation} rate limit 발생: {exc}"
+        if failure_reason == FailureReasonCode.OPENAI_TIMEOUT:
+            return f"OpenAI {operation} timeout 발생: {exc}"
+        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
+            return f"OpenAI {operation} 요청 검증 실패: {exc}"
+        return f"OpenAI {operation} 처리 중 알 수 없는 오류가 발생했습니다: {exc}"
 
-[채용 공고 텍스트]
-{raw_text}
-""".strip()
 
-    def _build_classification_prompt(
+class JobPostingOpenAiWorker(_OpenAiWorkerBase):
+    def __init__(self) -> None:
+        timeout = _processing_sla_timeout_seconds()
+        self._client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
+        self._async_client = _build_async_openai_client(api_key=settings.openai_api_key, timeout=timeout)
+        self._model = settings.openai_job_posting_model
+        self._task_type = "JOB_POSTING_INGEST"
+
+    def extract(self, raw_text: str | None, image_url: str | None) -> JobPostingExtractResponse:
+        operation = "job-posting-extract"
+        prompt = build_job_posting_extract_prompt(raw_text or "", image_url is not None)
+        content = [{"type": "input_text", "text": prompt}]
+        if image_url:
+            content.append({"type": "input_image", "image_url": image_url})
+
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.extract.started",
+            "OpenAI extract 호출을 시작합니다.",
+            model=self._model,
+            hasImage=image_url is not None,
+        )
+        response = self._create_response(
+            input_payload=[{"role": "user", "content": content}],
+            temperature=0.1,
+            operation="extract",
+            event_prefix="openai.extract",
+        )
+        return self._finalize_extract_response(response=response, operation=operation, started_at=started_at)
+
+    async def extract_async(self, raw_text: str | None, image_url: str | None) -> JobPostingExtractResponse:
+        operation = "job-posting-extract"
+        prompt = build_job_posting_extract_prompt(raw_text or "", image_url is not None)
+        content = [{"type": "input_text", "text": prompt}]
+        if image_url:
+            content.append({"type": "input_image", "image_url": image_url})
+
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.extract.started",
+            "OpenAI extract 호출을 시작합니다.",
+            model=self._model,
+            hasImage=image_url is not None,
+        )
+        response = await self._create_response_async(
+            input_payload=[{"role": "user", "content": content}],
+            temperature=0.1,
+            operation="extract",
+            event_prefix="openai.extract",
+        )
+        return self._finalize_extract_response(response=response, operation=operation, started_at=started_at)
+
+    def classify(
         self,
         extracted: JobPostingExtractResponse,
         candidates: list[JobPostingClassificationCandidateResponse],
-    ) -> str:
-        candidate_text = "\n".join(
-            [
-                (
-                    f"- id={candidate.detailClassificationId} | 대분류={candidate.bigClassificationName} "
-                    f"| 중분류={candidate.middleClassificationName} | 소분류={candidate.detailClassificationName} "
-                    f"| score={candidate.score:.4f}"
-                )
-                for candidate in candidates
-            ]
+    ) -> JobPostingClassificationResultResponse:
+        operation = "job-posting-classify"
+        prompt = build_job_posting_classification_prompt(extracted, candidates)
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.classify.started",
+            "OpenAI classify 호출을 시작합니다.",
+            model=self._model,
+            candidateCount=len(candidates),
         )
-        return f"""
-다음 채용 공고 정보에 가장 적합한 소분류 후보를 하나 선택하세요.
-반드시 JSON만 반환하세요.
+        response = self._create_response(
+            input_payload=prompt,
+            temperature=0.1,
+            operation="classify",
+            event_prefix="openai.classify",
+        )
+        return self._finalize_classification_response(
+            response=response,
+            operation=operation,
+            started_at=started_at,
+            candidates=candidates,
+        )
 
-{{
-  "detailClassificationId": 1,
-  "detailClassificationName": "string",
-  "middleClassificationName": "string",
-  "bigClassificationName": "string",
-  "reason": "string",
-  "confidence": 0.0
-}}
+    async def classify_async(
+        self,
+        extracted: JobPostingExtractResponse,
+        candidates: list[JobPostingClassificationCandidateResponse],
+    ) -> JobPostingClassificationResultResponse:
+        operation = "job-posting-classify"
+        prompt = build_job_posting_classification_prompt(extracted, candidates)
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.classify.started",
+            "OpenAI classify 호출을 시작합니다.",
+            model=self._model,
+            candidateCount=len(candidates),
+        )
+        response = await self._create_response_async(
+            input_payload=prompt,
+            temperature=0.1,
+            operation="classify",
+            event_prefix="openai.classify",
+        )
+        return self._finalize_classification_response(
+            response=response,
+            operation=operation,
+            started_at=started_at,
+            candidates=candidates,
+        )
 
-[추출 결과]
-- 회사명: {extracted.companyName}
-- 직무명: {extracted.jobTitle}
-- 주요 업무: {extracted.task}
-- 자격 요건: {extracted.requirements}
-- 우대 사항: {extracted.preferredQualifications}
-
-[후보]
-{candidate_text}
-""".strip()
-
-    def _build_generation_prompt(
+    def generate(
         self,
         extracted: JobPostingExtractResponse,
         classification: JobPostingClassificationResultResponse,
-    ) -> str:
-        return f"""
-다음 정보를 기반으로 저장 가능한 채용 공고 정제 결과를 JSON으로 생성하세요.
-반드시 JSON만 반환하세요.
+    ) -> JobPostingGenerateResponse:
+        operation = "job-posting-generate"
+        prompt = build_job_posting_generation_prompt(extracted, classification)
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.generate.started",
+            "OpenAI generate 호출을 시작합니다.",
+            model=self._model,
+        )
+        response = self._create_response(
+            input_payload=prompt,
+            temperature=0.7,
+            operation="generate",
+            event_prefix="openai.generate",
+        )
+        return self._finalize_generation_response(
+            response=response,
+            operation=operation,
+            started_at=started_at,
+            extracted=extracted,
+        )
 
-{{
-  "companyName": "string",
-  "jobTitle": "string",
-  "task": "string",
-  "requirements": "string",
-  "preferredQualifications": "string",
-  "summary": "string"
-}}
+    async def generate_async(
+        self,
+        extracted: JobPostingExtractResponse,
+        classification: JobPostingClassificationResultResponse,
+    ) -> JobPostingGenerateResponse:
+        operation = "job-posting-generate"
+        prompt = build_job_posting_generation_prompt(extracted, classification)
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.generate.started",
+            "OpenAI generate 호출을 시작합니다.",
+            model=self._model,
+        )
+        response = await self._create_response_async(
+            input_payload=prompt,
+            temperature=0.7,
+            operation="generate",
+            event_prefix="openai.generate",
+        )
+        return self._finalize_generation_response(
+            response=response,
+            operation=operation,
+            started_at=started_at,
+            extracted=extracted,
+        )
 
-[추출 결과]
-- 회사명: {extracted.companyName}
-- 직무명: {extracted.jobTitle}
-- 주요 업무: {extracted.task}
-- 자격 요건: {extracted.requirements}
-- 우대 사항: {extracted.preferredQualifications}
+    def _create_response(self, *, input_payload: object, temperature: float, operation: str, event_prefix: str):
+        started_at = monotonic()
+        try:
+            return self._client.responses.create(
+                model=self._model,
+                temperature=temperature,
+                input=input_payload,
+            )
+        except Exception as exc:
+            self._raise_create_response_error(
+                operation=operation,
+                event_prefix=event_prefix,
+                started_at=started_at,
+                exc=exc,
+            )
 
-[분류 결과]
-- 대분류: {classification.bigClassificationName}
-- 중분류: {classification.middleClassificationName}
-- 소분류: {classification.detailClassificationName}
-""".strip()
+    async def _create_response_async(self, *, input_payload: object, temperature: float, operation: str, event_prefix: str):
+        started_at = monotonic()
+        try:
+            return await await_if_needed(
+                self._async_client.responses.create(
+                    model=self._model,
+                    temperature=temperature,
+                    input=input_payload,
+                )
+            )
+        except Exception as exc:
+            self._raise_create_response_error(
+                operation=operation,
+                event_prefix=event_prefix,
+                started_at=started_at,
+                exc=exc,
+            )
 
+    def _raise_create_response_error(
+        self,
+        *,
+        operation: str,
+        event_prefix: str,
+        started_at: float,
+        exc: Exception,
+    ) -> None:
+        failure_reason = classify_openai_failure(exc)
+        increment_llm_request_error(self._task_type, operation, failure_reason.value)
+        self._log_openai_failure(event_prefix, started_at, exc)
+        observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+        request_id = self._extract_request_id(exc)
 
-class AnalysisOpenAiWorker:
+        if failure_reason == FailureReasonCode.RATE_LIMIT:
+            raise RetryableWorkerError(
+                f"OpenAI {operation} rate limit 발생: {exc}",
+                failure_reason=failure_reason.value,
+                openai_request_id=request_id,
+            ) from exc
+        if failure_reason == FailureReasonCode.OPENAI_TIMEOUT:
+            raise RetryableWorkerError(
+                f"OpenAI {operation} timeout 발생: {exc}",
+                failure_reason=failure_reason.value,
+                openai_request_id=request_id,
+            ) from exc
+        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
+            raise NonRetryableWorkerError(
+                f"OpenAI {operation} 요청 검증 실패: {exc}",
+                failure_reason=failure_reason.value,
+                openai_request_id=request_id,
+            ) from exc
+        raise RetryableWorkerError(
+            f"OpenAI {operation} 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
+            failure_reason=failure_reason.value,
+            openai_request_id=request_id,
+        ) from exc
+
+    def _finalize_extract_response(self, *, response: object, operation: str, started_at: float) -> JobPostingExtractResponse:
+        try:
+            result = parse_job_posting_extract_response(response.output_text)
+        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
+            log_warning(
+                logger,
+                "openai.extract.failed",
+                "OpenAI extract 응답 검증에 실패했습니다.",
+                model=self._model,
+                latencyMs=self._elapsed_millis(started_at),
+                openaiRequestId=self._extract_request_id(response),
+                errorCode=FailureReasonCode.VALIDATION_ERROR.value,
+                error=str(exc),
+            )
+            raise NonRetryableWorkerError(
+                f"OpenAI extract 응답 검증 실패: {exc}",
+                failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
+                openai_request_id=self._extract_request_id(response),
+            ) from exc
+        except (RetryableWorkerError, NonRetryableWorkerError):
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            raise
+
+        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+        log_info(
+            logger,
+            "openai.extract.completed",
+            "OpenAI extract 호출이 완료되었습니다.",
+            model=self._model,
+            latencyMs=self._elapsed_millis(started_at),
+            openaiRequestId=self._extract_request_id(response),
+        )
+        return result
+
+    def _finalize_classification_response(
+        self,
+        *,
+        response: object,
+        operation: str,
+        started_at: float,
+        candidates: list[JobPostingClassificationCandidateResponse],
+    ) -> JobPostingClassificationResultResponse:
+        try:
+            result = parse_job_posting_classification_response(response.output_text)
+        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            observe_llm_request(self._task_type, operation, "fallback", self._elapsed_seconds(started_at))
+            increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
+            log_warning(
+                logger,
+                "openai.classify.fallback",
+                "OpenAI classify 응답 검증에 실패해 fallback을 사용합니다.",
+                model=self._model,
+                latencyMs=self._elapsed_millis(started_at),
+                openaiRequestId=self._extract_request_id(response),
+                errorCode=FailureReasonCode.VALIDATION_ERROR.value,
+                error=str(exc),
+            )
+            if not candidates:
+                raise NonRetryableWorkerError(
+                    "소분류 후보를 찾을 수 없습니다.",
+                    failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
+                    openai_request_id=self._extract_request_id(response),
+                )
+            return build_job_posting_classification_fallback(candidates)
+        except (RetryableWorkerError, NonRetryableWorkerError):
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            raise
+
+        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+        log_info(
+            logger,
+            "openai.classify.completed",
+            "OpenAI classify 호출이 완료되었습니다.",
+            model=self._model,
+            latencyMs=self._elapsed_millis(started_at),
+            openaiRequestId=self._extract_request_id(response),
+        )
+        return result
+
+    def _finalize_generation_response(
+        self,
+        *,
+        response: object,
+        operation: str,
+        started_at: float,
+        extracted: JobPostingExtractResponse,
+    ) -> JobPostingGenerateResponse:
+        try:
+            result = parse_job_posting_generate_response(response.output_text)
+        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            observe_llm_request(self._task_type, operation, "fallback", self._elapsed_seconds(started_at))
+            increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
+            log_warning(
+                logger,
+                "openai.generate.fallback",
+                "OpenAI generate 응답 검증에 실패해 fallback을 사용합니다.",
+                model=self._model,
+                latencyMs=self._elapsed_millis(started_at),
+                openaiRequestId=self._extract_request_id(response),
+                errorCode=FailureReasonCode.VALIDATION_ERROR.value,
+                error=str(exc),
+            )
+            return build_job_posting_generate_fallback(extracted)
+        except (RetryableWorkerError, NonRetryableWorkerError):
+            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+            raise
+
+        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+        log_info(
+            logger,
+            "openai.generate.completed",
+            "OpenAI generate 호출이 완료되었습니다.",
+            model=self._model,
+            latencyMs=self._elapsed_millis(started_at),
+            openaiRequestId=self._extract_request_id(response),
+        )
+        return result
+
+class AnalysisOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:
-        self._client = OpenAI(api_key=settings.openai_api_key)
+        timeout = _processing_sla_timeout_seconds()
+        self._client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
+        self._async_client = _build_async_openai_client(api_key=settings.openai_api_key, timeout=timeout)
         self._model = settings.openai_analysis_model
         self._task_type = "ANALYSIS"
+
+    def _build_analysis_prompt(self, context: AnalysisWorkerContextResponse) -> str:
+        return build_analysis_prompt(context)
+
+    def _format_create_response_error_message(
+        self,
+        failure_reason: FailureReasonCode,
+        operation: str,
+        exc: Exception,
+    ) -> str:
+        if failure_reason == FailureReasonCode.RATE_LIMIT:
+            return f"OpenAI rate limit 발생: {exc}"
+        if failure_reason == FailureReasonCode.OPENAI_TIMEOUT:
+            return f"OpenAI timeout 발생: {exc}"
+        if failure_reason == FailureReasonCode.VALIDATION_ERROR:
+            return f"OpenAI 입력/응답 검증 실패: {exc}"
+        return f"OpenAI 처리 중 알 수 없는 오류가 발생했습니다: {exc}"
 
     def analyze(self, context: AnalysisWorkerContextResponse) -> tuple[AnalysisLlmResponse, str | None]:
         operation = "analysis-final"
@@ -440,8 +549,17 @@ class AnalysisOpenAiWorker:
                 temperature=0.2,
                 input=prompt,
             )
-            payload = self._parse_json(response.output_text)
-            result = AnalysisLlmResponse.model_validate(payload)
+        except Exception as exc:
+            self._raise_create_response_error(
+                operation=operation,
+                event_prefix="openai.generate",
+                started_at=started_at,
+                exc=exc,
+                event_operation="analysis",
+            )
+
+        try:
+            result = parse_analysis_response(response.output_text)
             request_id = self._extract_request_id(response)
             usage_fields = self._extract_usage_fields(response)
             log_info(
@@ -456,91 +574,71 @@ class AnalysisOpenAiWorker:
             )
             observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
             return result, request_id
-        except RateLimitError as exc:
-            increment_llm_request_error(self._task_type, operation, "RATE_LIMIT")
-            self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise RetryableWorkerError(
-                f"OpenAI rate limit 발생: {exc}",
-                failure_reason="RATE_LIMIT",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-        except APITimeoutError as exc:
-            increment_llm_request_error(self._task_type, operation, "OPENAI_TIMEOUT")
-            self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise RetryableWorkerError(
-                f"OpenAI timeout 발생: {exc}",
-                failure_reason="OPENAI_TIMEOUT",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
         except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            increment_llm_request_error(self._task_type, operation, "VALIDATION_ERROR")
+            increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
             observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
             raise NonRetryableWorkerError(
                 f"OpenAI 입력/응답 검증 실패: {exc}",
-                failure_reason="VALIDATION_ERROR",
+                failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
-        except APIConnectionError as exc:
-            increment_llm_request_error(self._task_type, operation, "OPENAI_TIMEOUT")
-            self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise RetryableWorkerError(
-                f"OpenAI 연결 실패: {exc}",
-                failure_reason="OPENAI_TIMEOUT",
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
-        except APIStatusError as exc:
-            error_type = "RATE_LIMIT" if getattr(exc, "status_code", None) == 429 else "INTERNAL_ERROR"
-            increment_llm_request_error(self._task_type, operation, error_type)
-            self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
-            observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            failure_reason = "INTERNAL_ERROR"
-            if getattr(exc, "status_code", None) == 429:
-                failure_reason = "RATE_LIMIT"
-            raise RetryableWorkerError(
-                f"OpenAI API 상태 오류: {exc}",
-                failure_reason=failure_reason,
-                openai_request_id=self._extract_request_id(exc),
-            ) from exc
+
+    async def analyze_async(self, context: AnalysisWorkerContextResponse) -> tuple[AnalysisLlmResponse, str | None]:
+        operation = "analysis-final"
+        prompt = self._build_analysis_prompt(context)
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.generate.started",
+            "OpenAI analysis 호출을 시작합니다.",
+            model=self._model,
+            operation="analysis",
+            questionCount=len(context.questions),
+        )
+
+        try:
+            response = await await_if_needed(
+                self._async_client.responses.create(
+                    model=self._model,
+                    temperature=0.2,
+                    input=prompt,
+                )
+            )
         except Exception as exc:
-            increment_llm_request_error(self._task_type, operation, "INTERNAL_ERROR")
+            self._raise_create_response_error(
+                operation=operation,
+                event_prefix="openai.generate",
+                started_at=started_at,
+                exc=exc,
+                event_operation="analysis",
+            )
+
+        try:
+            result = parse_analysis_response(response.output_text)
+            request_id = self._extract_request_id(response)
+            usage_fields = self._extract_usage_fields(response)
+            log_info(
+                logger,
+                "openai.generate.completed",
+                "OpenAI analysis 호출이 완료되었습니다.",
+                model=self._model,
+                operation="analysis",
+                latencyMs=self._elapsed_millis(started_at),
+                openaiRequestId=request_id,
+                **usage_fields,
+            )
+            observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            return result, request_id
+        except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
             self._log_openai_failure("openai.generate", started_at, exc, operation="analysis")
             observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
-            raise RetryableWorkerError(
-                f"OpenAI 처리 중 알 수 없는 오류가 발생했습니다: {exc}",
-                failure_reason="INTERNAL_ERROR",
+            raise NonRetryableWorkerError(
+                f"OpenAI 입력/응답 검증 실패: {exc}",
+                failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
-
-    def _parse_json(self, raw_text: str) -> dict:
-        start = raw_text.find("{")
-        end = raw_text.rfind("}")
-        candidate = raw_text[start : end + 1] if start >= 0 and end >= 0 else raw_text
-        return json.loads(candidate)
-
-    def _extract_request_id(self, response_or_exc: object) -> str | None:
-        for attr_name in ("_request_id", "request_id", "id"):
-            value = getattr(response_or_exc, attr_name, None)
-            if isinstance(value, str) and value:
-                return value
-
-        response = getattr(response_or_exc, "response", None)
-        if response is not None:
-            headers = getattr(response, "headers", None)
-            if headers:
-                request_id = headers.get("x-request-id") or headers.get("request-id")
-                if request_id:
-                    return request_id
-        return None
-
-    def _elapsed_millis(self, started_at: float) -> int:
-        return max(int((monotonic() - started_at) * 1000), 0)
-
-    def _elapsed_seconds(self, started_at: float) -> float:
-        return max(monotonic() - started_at, 0.0)
 
     def _extract_usage_fields(self, response: object) -> dict[str, int]:
         usage = getattr(response, "usage", None)
@@ -581,119 +679,3 @@ class AnalysisOpenAiWorker:
         if isinstance(source, dict):
             return source.get(key)
         return getattr(source, key, None)
-
-    def _log_openai_failure(
-        self,
-        event_prefix: str,
-        started_at: float,
-        exc: Exception,
-        *,
-        operation: str | None = None,
-    ) -> None:
-        log_warning(
-            logger,
-            f"{event_prefix}.failed",
-            "OpenAI 호출이 실패했습니다.",
-            model=self._model,
-            operation=operation,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(exc),
-            errorCode=self._derive_error_code(exc),
-            error=str(exc),
-        )
-
-    def _derive_error_code(self, exc: Exception) -> str:
-        if isinstance(exc, RateLimitError):
-            return "RATE_LIMIT"
-        if isinstance(exc, (APITimeoutError, APIConnectionError)):
-            return "OPENAI_TIMEOUT"
-        if isinstance(exc, (BadRequestError, json.JSONDecodeError, ValueError)):
-            return "VALIDATION_ERROR"
-        return "INTERNAL_ERROR"
-
-    def _build_analysis_prompt(self, context: AnalysisWorkerContextResponse) -> str:
-        question_block = "\n".join(
-            [
-                (
-                    f"- questionId={question.questionId}\n"
-                    f"  question={question.question}\n"
-                    f"  answer={question.answer}\n"
-                    f"  charLimit={question.charLimit}"
-                )
-                for question in context.questions
-            ]
-        )
-        return f"""
-당신은 자기소개서 분석 평가자입니다.
-지원 직무 적합도, 답변의 임팩트, 전체 완성도를 0부터 100 사이 정수로 평가하고,
-전체 피드백, 핵심 강점/약점, 누락 키워드, 각 문항별 분석을 JSON으로만 반환하세요.
-
-반드시 아래 스키마만 반환하세요.
-{{
-  "jobFit": 0,
-  "impact": 0,
-  "completeness": 0,
-  "feedback": "string",
-  "keyStrengths": [
-    {{
-      "title": "짧은 핵심 강점 문장",
-      "quote": "자소서 답변에 실제 포함된 정확한 부분 문자열"
-    }}
-  ],
-  "keyWeaknesses": [
-    {{
-      "title": "짧은 핵심 약점 문장",
-      "quote": "JD 또는 자소서 답변에 실제 포함된 정확한 부분 문자열"
-    }}
-  ],
-  "missingKeywords": [
-    {{
-      "keyword": "JD에는 있지만 답변에서 충분히 드러나지 않은 짧은 역량/요건",
-      "source": "qualification|preference|mainTask"
-    }}
-  ],
-  "questionAnalyses": [
-    {{
-      "questionId": 1,
-      "sentence": "string",
-      "status": "proven|mentioned|fabricated",
-      "reason": "string",
-      "improvement": "string"
-    }}
-  ]
-}}
-
-[판정 규칙]
-- jobFit, impact, completeness는 0부터 100 사이 정수만 사용한다.
-- questionAnalyses의 questionId는 입력된 questionId 중 하나만 사용한다.
-- questionAnalyses의 sentence는 반드시 해당 questionId의 answer에 실제 포함된 정확한 substring이어야 한다.
-- answer가 비어 있지 않은 모든 입력 문항은 questionAnalyses에 최소 1개 이상 포함한다.
-- questionAnalyses는 비어 있지 않은 answer를 가진 모든 questionId를 빠짐없이 커버해야 한다.
-- 각 문항에서 가장 평가 가치가 큰 실제 문장 1개를 우선 선택하고, 필요하면 문항당 최대 2개까지 포함한다.
-- 강한 긍정 근거가 부족한 문항도 생략하지 말고, 해당 answer의 실제 문장 1개를 골라 mentioned 또는 fabricated로 평가한다.
-- 원문 매칭이 불확실하면 문장을 요약하거나 재작성하지 말고, 해당 answer에서 더 짧고 정확히 일치하는 substring을 다시 선택한다.
-- status는 proven, mentioned, fabricated 중 하나만 사용한다.
-- proven: 답변에 구체적인 근거, 행동, 결과가 충분히 드러남
-- mentioned: 관련 키워드나 경험은 있으나 구체적인 근거, 에피소드, 결과가 부족함
-- fabricated: 답변에 없는 내용을 있는 것처럼 주장하거나 과장 위험이 큼
-- 관련 언급이 전혀 없는 missing 사례는 원문 sentence가 없으므로 questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다.
-- keyStrengths와 keyWeaknesses는 각각 최대 3개이며, 없으면 []로 출력한다.
-- keyStrengths의 quote는 자소서 answer에 실제 포함된 substring만 사용한다.
-- missingKeywords는 최대 3개이며, 없으면 []로 출력한다.
-- missingKeywords의 source는 qualification, preference, mainTask 중 하나만 사용한다.
-- keyWeaknesses의 첫 항목들은 가능하면 missingKeywords와 같은 누락 요건을 다룬다.
-- missingKeywords 기반 keyWeaknesses의 quote는 JD의 주요 업무, 자격 요건, 우대 사항에 실제 포함된 표현을 사용한다.
-- missingKeywords가 없으면 keyWeaknesses는 questionAnalyses의 보완 대상 문장 quote를 우선 사용한다.
-- 모든 title은 한 문장으로 짧게 작성한다.
-
-[채용 공고]
-- 회사명: {context.companyName}
-- 직무명: {context.jobTitle}
-- 주요 업무: {context.task}
-- 자격 요건: {context.requirements}
-- 우대 사항: {context.preferredQualifications}
-- 직무 분류: {context.bigClassificationName} > {context.middleClassificationName} > {context.detailClassificationName}
-
-[문항 및 답변]
-{question_block}
-""".strip()
