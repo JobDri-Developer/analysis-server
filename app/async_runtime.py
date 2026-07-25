@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.config import settings
+from app.error_codes import FailureReasonCode
 from app.logging_utils import bind_log_context, log_exception, log_info, log_warning
 from app.metrics import increment_task_retry
 from app.schemas import (
@@ -272,11 +273,11 @@ class AsyncConsumerRuntime:
                     "queue.consume.failed",
                     "예상치 못한 worker 에러가 발생했습니다.",
                     deliveryTag=getattr(incoming_message, "delivery_tag", None),
-                    failureReason="INTERNAL_ERROR",
-                    errorCode="INTERNAL_ERROR",
+                    failureReason=FailureReasonCode.INTERNAL_ERROR.value,
+                    errorCode=FailureReasonCode.INTERNAL_ERROR.value,
                     taskProcessingLatencyMs=processing_latency_ms,
                 )
-                retryable_exc = RetryableWorkerError(str(exc), failure_reason="INTERNAL_ERROR")
+                retryable_exc = RetryableWorkerError(str(exc), failure_reason=FailureReasonCode.INTERNAL_ERROR.value)
                 outcome = await self._retry_or_fail_async(incoming_message, properties, message, incoming_message.body, retryable_exc)
                 self._consumer._observe_processing_metric(message.taskType, outcome, processing_latency_ms)
         finally:

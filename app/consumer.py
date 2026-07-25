@@ -19,6 +19,7 @@ from app.async_runtime import AsyncConsumerRuntime
 from app.concurrency import TaskTypeConcurrencyLimiter, TaskTypeConcurrencyConfig
 from app.config import settings
 from app.delivery import WorkerDeliveryService
+from app.error_codes import FailureReasonCode
 from app.logging_utils import bind_log_context, log_exception, log_info, log_warning
 from app.metrics import (
     decrement_task_inflight,
@@ -302,11 +303,11 @@ class RabbitMqConsumer:
                     "queue.consume.failed",
                     "예상치 못한 worker 에러가 발생했습니다.",
                     deliveryTag=getattr(method, "delivery_tag", None),
-                    failureReason="INTERNAL_ERROR",
-                    errorCode="INTERNAL_ERROR",
+                    failureReason=FailureReasonCode.INTERNAL_ERROR.value,
+                    errorCode=FailureReasonCode.INTERNAL_ERROR.value,
                     taskProcessingLatencyMs=processing_latency_ms,
                 )
-                retryable_exc = RetryableWorkerError(str(exc), failure_reason="INTERNAL_ERROR")
+                retryable_exc = RetryableWorkerError(str(exc), failure_reason=FailureReasonCode.INTERNAL_ERROR.value)
                 outcome = self._retry_or_fail(channel, method.delivery_tag, properties, message, body, retryable_exc)
                 observe_task_processing(message.taskType, outcome, processing_latency_ms / 1000)
         finally:
@@ -1076,7 +1077,7 @@ class RabbitMqConsumer:
                     f"analysis 작업이 queue timeout을 초과했습니다. "
                     f"latency={queue_latency_millis}ms threshold={settings.analysis_queue_timeout_millis}ms"
                 ),
-                failure_reason="QUEUE_TIMEOUT",
+                failure_reason=FailureReasonCode.QUEUE_TIMEOUT.value,
                 queue_latency_millis=queue_latency_millis,
             )
 

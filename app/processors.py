@@ -7,6 +7,7 @@ from time import monotonic
 from app.api_client import SpringWorkerApiClient
 from app.config import settings
 from app.delivery import WorkerDeliveryService
+from app.error_codes import FailureReasonCode
 from app.logging_utils import bind_log_context, log_info, log_warning
 from app.metrics import observe_task_queue_wait
 from app.openai_client import AnalysisOpenAiWorker, JobPostingOpenAiWorker
@@ -90,7 +91,7 @@ class JobPostingTaskProcessor:
             if not candidates:
                 raise NonRetryableWorkerError(
                     "소분류 후보를 찾을 수 없습니다.",
-                    failure_reason="VALIDATION_ERROR",
+                    failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
                     queue_latency_millis=queue_latency_millis,
                 )
 
@@ -214,7 +215,7 @@ class JobPostingTaskProcessor:
             if not candidates:
                 raise NonRetryableWorkerError(
                     "소분류 후보를 찾을 수 없습니다.",
-                    failure_reason="VALIDATION_ERROR",
+                    failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
                     queue_latency_millis=queue_latency_millis,
                 )
 
@@ -609,7 +610,7 @@ class AnalysisTaskProcessor:
                     f"analysis 작업이 queue timeout을 초과했습니다. "
                     f"latency={queue_latency_millis}ms threshold={settings.analysis_queue_timeout_millis}ms"
                 ),
-                failure_reason="QUEUE_TIMEOUT",
+                failure_reason=FailureReasonCode.QUEUE_TIMEOUT.value,
                 queue_latency_millis=queue_latency_millis,
             )
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from prometheus_client import Counter, Gauge, Histogram
 
+from app.error_codes import FAILURE_REASON_METRIC_LABELS
+
 DURATION_BUCKETS = (
     0.01,
     0.05,
@@ -26,13 +28,7 @@ _TASK_TYPE_LABELS = {
     "JOB_POSTING_INGEST": "jobposting",
 }
 
-_REASON_LABELS = {
-    "RATE_LIMIT": "rate_limit",
-    "QUEUE_TIMEOUT": "queue_timeout",
-    "OPENAI_TIMEOUT": "timeout",
-    "VALIDATION_ERROR": "validation_error",
-    "INTERNAL_ERROR": "internal_error",
-}
+_REASON_LABELS = {code.value: label for code, label in FAILURE_REASON_METRIC_LABELS.items()}
 
 llm_request_duration_seconds = Histogram(
     "llm_request_duration_seconds",
