@@ -177,16 +177,20 @@ class PrometheusMetricsTests(unittest.TestCase):
         analysis_before = _sample_value("worker_task_concurrency_limit", analysis_labels)
         jobposting_before = _sample_value("worker_task_concurrency_limit", jobposting_labels)
 
-        set_task_concurrency_limit("ANALYSIS", 3)
-        set_task_concurrency_limit("JOB_POSTING_INGEST", 5)
+        try:
+            set_task_concurrency_limit("ANALYSIS", 3)
+            set_task_concurrency_limit("JOB_POSTING_INGEST", 5)
 
-        analysis_after = _sample_value("worker_task_concurrency_limit", analysis_labels)
-        jobposting_after = _sample_value("worker_task_concurrency_limit", jobposting_labels)
+            analysis_after = _sample_value("worker_task_concurrency_limit", analysis_labels)
+            jobposting_after = _sample_value("worker_task_concurrency_limit", jobposting_labels)
 
-        self.assertNotEqual(analysis_after, analysis_before)
-        self.assertNotEqual(jobposting_after, jobposting_before)
-        self.assertEqual(analysis_after, 3.0)
-        self.assertEqual(jobposting_after, 5.0)
+            self.assertNotEqual(analysis_after, analysis_before)
+            self.assertNotEqual(jobposting_after, jobposting_before)
+            self.assertEqual(analysis_after, 3.0)
+            self.assertEqual(jobposting_after, 5.0)
+        finally:
+            set_task_concurrency_limit("ANALYSIS", int(analysis_before))
+            set_task_concurrency_limit("JOB_POSTING_INGEST", int(jobposting_before))
 
     def test_duration_buckets_extend_beyond_observed_queue_wait_ceiling(self) -> None:
         self.assertGreater(max(DURATION_BUCKETS), 300.0)
@@ -492,6 +496,13 @@ class PrometheusMetricsTests(unittest.TestCase):
         openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345)
         async_openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345)
 
+    def test_openai_workers_require_async_client_for_initialization(self) -> None:
+        with patch("app.openai_client.AsyncOpenAI", None), patch("app.openai_client.OpenAI"):
+            with self.assertRaises(RuntimeError):
+                JobPostingOpenAiWorker()
+            with self.assertRaises(RuntimeError):
+                AnalysisOpenAiWorker()
+
     def test_analysis_validation_error_goes_to_non_retryable_path(self) -> None:
         consumer = RabbitMqConsumer(
             api_client=MagicMock(),
@@ -580,6 +591,79 @@ class PrometheusMetricsTests(unittest.TestCase):
         context_after = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
 
         self.assertEqual(result.imageUrl, "https://example.com/image.png")
+        self.assertEqual(api_after, api_before + 1.0)
+        self.assertEqual(context_after, context_before + 1.0)
+
+    def test_async_internal_api_context_request_timeout_records_failed_context_histogram(self) -> None:
+        client = SpringWorkerApiClient()
+        api_labels = {
+            "task_type": "jobposting",
+            "endpoint": "job_posting_context",
+            "method": "POST",
+            "outcome": "failed",
+        }
+        context_labels = {
+            "task_type": "jobposting",
+            "endpoint": "job_posting_context",
+            "outcome": "failed",
+        }
+        api_before = _sample_value("worker_internal_api_duration_seconds_count", api_labels)
+        context_before = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+
+        try:
+            with patch.object(
+                client._async_client,
+                "post",
+                new=AsyncMock(side_effect=httpx.TimeoutException("timed out")),
+            ):
+                with self.assertRaises(RetryableWorkerError):
+                    asyncio.run(client.get_context_async(1, "images/1.png"))
+        finally:
+            asyncio.run(client.aclose())
+
+        api_after = _sample_value("worker_internal_api_duration_seconds_count", api_labels)
+        context_after = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+
+        self.assertEqual(api_after, api_before + 1.0)
+        self.assertEqual(context_after, context_before + 1.0)
+
+    def test_async_internal_api_context_request_http_failure_records_failed_context_histogram(self) -> None:
+        client = SpringWorkerApiClient()
+        response = httpx.Response(
+            500,
+            json={
+                "isSuccess": False,
+                "code": "ERR",
+                "message": "server error",
+                "result": None,
+                "error": None,
+            },
+            request=httpx.Request("POST", "http://testserver/api/internal/worker/job-postings/ingest/context"),
+        )
+        api_labels = {
+            "task_type": "jobposting",
+            "endpoint": "job_posting_context",
+            "method": "POST",
+            "outcome": "failed",
+        }
+        context_labels = {
+            "task_type": "jobposting",
+            "endpoint": "job_posting_context",
+            "outcome": "failed",
+        }
+        api_before = _sample_value("worker_internal_api_duration_seconds_count", api_labels)
+        context_before = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+
+        try:
+            with patch.object(client._async_client, "post", new=AsyncMock(return_value=response)):
+                with self.assertRaises(RetryableWorkerError):
+                    asyncio.run(client.get_context_async(1, "images/1.png"))
+        finally:
+            asyncio.run(client.aclose())
+
+        api_after = _sample_value("worker_internal_api_duration_seconds_count", api_labels)
+        context_after = _sample_value("worker_context_fetch_duration_seconds_count", context_labels)
+
         self.assertEqual(api_after, api_before + 1.0)
         self.assertEqual(context_after, context_before + 1.0)
 

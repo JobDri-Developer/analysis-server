@@ -249,9 +249,16 @@ class WorkerConcurrencyTests(unittest.TestCase):
             ack=AsyncMock(),
             nack=AsyncMock(),
         )
+        call_sequence: list[str] = []
 
         async def fake_sleep(_seconds: float) -> None:
+            call_sequence.append("sleep")
             return None
+
+        async def fake_nack(*, requeue: bool) -> None:
+            call_sequence.append(f"nack:{requeue}")
+
+        incoming_message.nack.side_effect = fake_nack
 
         with patch.object(consumer, "_register_inflight", return_value=False), patch(
             "app.async_runtime.asyncio.sleep",
@@ -262,6 +269,7 @@ class WorkerConcurrencyTests(unittest.TestCase):
         incoming_message.nack.assert_awaited_once_with(requeue=True)
         sleep_mock.assert_called_once()
         incoming_message.ack.assert_not_called()
+        self.assertEqual(call_sequence, ["sleep", "nack:True"])
 
     def test_settings_reject_zero_concurrency_limit(self) -> None:
         with self.assertRaises(ValidationError):
@@ -272,12 +280,14 @@ class WorkerConcurrencyTests(unittest.TestCase):
             )
 
     def test_settings_reject_zero_prefetch_count(self) -> None:
-        with self.assertRaises(ValidationError):
-            Settings(
-                APP_WORKER_INTERNAL_API_KEY="test-internal-key",
-                OPENAI_API_KEY="test-openai-key",
-                WORKER_PREFETCH_COUNT=0,
-            )
+        for invalid_value in (0, -1):
+            with self.subTest(prefetch_count=invalid_value):
+                with self.assertRaises(ValidationError):
+                    Settings(
+                        APP_WORKER_INTERNAL_API_KEY="test-internal-key",
+                        OPENAI_API_KEY="test-openai-key",
+                        WORKER_PREFETCH_COUNT=invalid_value,
+                    )
 
 
 if __name__ == "__main__":
