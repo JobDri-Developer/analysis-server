@@ -157,12 +157,18 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
         self._model = settings.openai_job_posting_model
         self._task_type = "JOB_POSTING_INGEST"
 
-    def extract(self, raw_text: str | None, image_url: str | None) -> JobPostingExtractResponse:
+    def extract(
+        self,
+        raw_text: str | None,
+        image_url: str | None,
+        image_urls: list[str] | None = None,
+    ) -> JobPostingExtractResponse:
         operation = "job-posting-extract"
-        prompt = build_job_posting_extract_prompt(raw_text or "", image_url is not None)
+        normalized_image_urls = self._normalize_image_urls(image_url, image_urls)
+        prompt = build_job_posting_extract_prompt(raw_text or "", bool(normalized_image_urls))
         content = [{"type": "input_text", "text": prompt}]
-        if image_url:
-            content.append({"type": "input_image", "image_url": image_url})
+        for normalized_image_url in normalized_image_urls:
+            content.append({"type": "input_image", "image_url": normalized_image_url})
 
         started_at = monotonic()
         log_info(
@@ -170,7 +176,8 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
             "openai.extract.started",
             "OpenAI extract 호출을 시작합니다.",
             model=self._model,
-            hasImage=image_url is not None,
+            hasImage=bool(normalized_image_urls),
+            imageCount=len(normalized_image_urls),
         )
         response = self._create_response(
             input_payload=[{"role": "user", "content": content}],
@@ -180,12 +187,18 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
         )
         return self._finalize_extract_response(response=response, operation=operation, started_at=started_at)
 
-    async def extract_async(self, raw_text: str | None, image_url: str | None) -> JobPostingExtractResponse:
+    async def extract_async(
+        self,
+        raw_text: str | None,
+        image_url: str | None,
+        image_urls: list[str] | None = None,
+    ) -> JobPostingExtractResponse:
         operation = "job-posting-extract"
-        prompt = build_job_posting_extract_prompt(raw_text or "", image_url is not None)
+        normalized_image_urls = self._normalize_image_urls(image_url, image_urls)
+        prompt = build_job_posting_extract_prompt(raw_text or "", bool(normalized_image_urls))
         content = [{"type": "input_text", "text": prompt}]
-        if image_url:
-            content.append({"type": "input_image", "image_url": image_url})
+        for normalized_image_url in normalized_image_urls:
+            content.append({"type": "input_image", "image_url": normalized_image_url})
 
         started_at = monotonic()
         log_info(
@@ -193,7 +206,8 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
             "openai.extract.started",
             "OpenAI extract 호출을 시작합니다.",
             model=self._model,
-            hasImage=image_url is not None,
+            hasImage=bool(normalized_image_urls),
+            imageCount=len(normalized_image_urls),
         )
         response = await self._create_response_async(
             input_payload=[{"role": "user", "content": content}],
@@ -202,6 +216,16 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
             event_prefix="openai.extract",
         )
         return self._finalize_extract_response(response=response, operation=operation, started_at=started_at)
+
+    def _normalize_image_urls(self, image_url: str | None, image_urls: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        for candidate in [image_url, *(image_urls or [])]:
+            if not candidate:
+                continue
+            stripped = candidate.strip()
+            if stripped and stripped not in normalized:
+                normalized.append(stripped)
+        return normalized[:2]
 
     def classify(
         self,

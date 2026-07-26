@@ -125,8 +125,17 @@ class SpringWorkerApiClient:
         stored_result = self._parse_result(response, WorkerTaskStoredResultResponse)
         return self._parse_json_payload(stored_result.resultPayload, JobPostingWorkerFinalizeRequest)
 
-    def get_context(self, user_id: int, image_object_key: str | None) -> JobPostingWorkerContextResponse:
-        payload = JobPostingWorkerContextRequest(userId=user_id, imageObjectKey=image_object_key).model_dump(mode="json")
+    def get_context(
+        self,
+        user_id: int,
+        image_object_key: str | None,
+        image_object_keys: list[str] | None = None,
+    ) -> JobPostingWorkerContextResponse:
+        payload = JobPostingWorkerContextRequest(
+            userId=user_id,
+            imageObjectKey=image_object_key,
+            imageObjectKeys=image_object_keys,
+        ).model_dump(mode="json")
         response = self._post(
             "/api/internal/worker/job-postings/ingest/context",
             payload,
@@ -303,10 +312,20 @@ class SpringWorkerApiClient:
         stored_result = self._parse_result(response, WorkerTaskStoredResultResponse)
         return self._parse_json_payload(stored_result.resultPayload, JobPostingWorkerFinalizeRequest)
 
-    async def get_context_async(self, user_id: int, image_object_key: str | None) -> JobPostingWorkerContextResponse:
+    async def get_context_async(
+        self,
+        user_id: int,
+        image_object_key: str | None,
+        image_object_keys: list[str] | None = None,
+    ) -> JobPostingWorkerContextResponse:
+        payload = JobPostingWorkerContextRequest(
+            userId=user_id,
+            imageObjectKey=image_object_key,
+            imageObjectKeys=image_object_keys,
+        ).model_dump(mode="json")
         response = await self._post_async(
             "/api/internal/worker/job-postings/ingest/context",
-            JobPostingWorkerContextRequest(userId=user_id, imageObjectKey=image_object_key).model_dump(mode="json"),
+            payload,
             task_type="JOB_POSTING_INGEST",
             endpoint="job_posting_context",
             method="POST",

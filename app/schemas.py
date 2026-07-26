@@ -22,6 +22,7 @@ class JobPostingIngestTaskMessage(BaseModel):
     userId: int
     rawText: str | None = None
     imageObjectKey: str | None = None
+    imageObjectKeys: list[str] | None = None
     retryCount: int = 0
     maxRetryCount: int = 0
     submittedAt: datetime
@@ -30,10 +31,12 @@ class JobPostingIngestTaskMessage(BaseModel):
 class JobPostingWorkerContextRequest(BaseModel):
     userId: int
     imageObjectKey: str | None = None
+    imageObjectKeys: list[str] | None = None
 
 
 class JobPostingWorkerContextResponse(BaseModel):
     imageUrl: str | None = None
+    imageUrls: list[str] = Field(default_factory=list)
 
 
 class JobPostingWorkerRunningRequest(BaseModel):

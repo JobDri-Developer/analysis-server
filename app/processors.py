@@ -59,7 +59,7 @@ class JobPostingTaskProcessor:
                 return
             log_info(logger, "worker.task.started", "job posting 작업을 시작합니다.")
             context_started_at = monotonic()
-            context = self._api_client.get_context(message.userId, message.imageObjectKey)
+            context = self._api_client.get_context(message.userId, message.imageObjectKey, message.imageObjectKeys)
             context_fetch_latency_ms = self._elapsed_millis(context_started_at)
             log_info(
                 logger,
@@ -77,7 +77,7 @@ class JobPostingTaskProcessor:
                 ),
             )
 
-            extracted = self._openai_worker.extract(message.rawText, context.imageUrl)
+            extracted = self._openai_worker.extract(message.rawText, context.imageUrl, context.imageUrls)
             candidates_started_at = monotonic()
             candidates = self._api_client.get_candidates(extracted)
             candidate_fetch_latency_ms = self._elapsed_millis(candidates_started_at)
@@ -183,7 +183,11 @@ class JobPostingTaskProcessor:
                 return
             log_info(logger, "worker.task.started", "job posting 작업을 시작합니다.")
             context_started_at = monotonic()
-            context = await self._api_client.get_context_async(message.userId, message.imageObjectKey)
+            context = await self._api_client.get_context_async(
+                message.userId,
+                message.imageObjectKey,
+                message.imageObjectKeys,
+            )
             context_fetch_latency_ms = self._elapsed_millis(context_started_at)
             log_info(
                 logger,
@@ -201,7 +205,7 @@ class JobPostingTaskProcessor:
                 ),
             )
 
-            extracted = await self._openai_worker.extract_async(message.rawText, context.imageUrl)
+            extracted = await self._openai_worker.extract_async(message.rawText, context.imageUrl, context.imageUrls)
             candidates_started_at = monotonic()
             candidates = await self._api_client.get_candidates_async(extracted)
             candidate_fetch_latency_ms = self._elapsed_millis(candidates_started_at)
