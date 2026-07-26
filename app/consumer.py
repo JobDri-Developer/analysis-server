@@ -49,6 +49,10 @@ logger = logging.getLogger(__name__)
 TERMINAL_TASK_STATUSES = {"FAILED", "SUCCEEDED", "SUCCESS", "COMPLETED", "COMPLETE", "CANCELLED"}
 
 
+class CancelledWorkerTask(Exception):
+    pass
+
+
 class RabbitMqConsumer:
     def __init__(
         self,
@@ -215,6 +219,16 @@ class RabbitMqConsumer:
                     deliveryTag=getattr(method, "delivery_tag", None),
                 )
                 self._ack_message(channel, method.delivery_tag, reason="processed-successfully", message=message)
+        except CancelledWorkerTask as exc:
+            with bind_log_context(**self._message_log_context(message)):
+                log_info(
+                    logger,
+                    "queue.consume.cancelled",
+                    "취소된 작업이어서 메시지를 ack 처리합니다.",
+                    deliveryTag=getattr(method, "delivery_tag", None),
+                    error=str(exc),
+                )
+                self._ack_message(channel, method.delivery_tag, reason="task-cancelled", message=message)
         except NonRetryableWorkerError as exc:
             with bind_log_context(**self._message_log_context(message, queue_latency_millis=exc.queue_latency_millis)):
                 log_warning(
@@ -282,6 +296,7 @@ class RabbitMqConsumer:
             raise NonRetryableWorkerError(f"지원하지 않는 taskType입니다. taskType={message.taskType}")
 
         queue_latency_millis = self._safe_compute_queue_latency(message.submittedAt)
+        self._ensure_task_not_cancelled(message, "before-running")
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
             log_info(
                 logger,
@@ -297,9 +312,12 @@ class RabbitMqConsumer:
                 ),
             )
 
+            self._ensure_task_not_cancelled(message, "after-running")
             context = self._api_client.get_context(message.userId, message.imageObjectKey)
+            self._ensure_task_not_cancelled(message, "before-openai")
             openai_started_at = monotonic()
             extracted = self._openai_worker.extract(message.rawText, context.imageUrl)
+            self._ensure_task_not_cancelled(message, "after-extract")
             candidates = self._api_client.get_candidates(extracted)
             if not candidates:
                 raise NonRetryableWorkerError(
@@ -312,6 +330,7 @@ class RabbitMqConsumer:
                 self._openai_worker.classify(extracted, candidates),
                 candidates,
             )
+            self._ensure_task_not_cancelled(message, "after-classify")
             if classification.confidence < settings.job_posting_confidence_threshold:
                 log_info(
                     logger,
@@ -329,10 +348,12 @@ class RabbitMqConsumer:
                     generated=None,
                     saved=None,
                 )
+                self._ensure_task_not_cancelled(message, "before-low-confidence-complete")
                 self._complete_low_confidence_job_posting(message, result)
                 return
 
             generated = self._openai_worker.generate(extracted, classification)
+            self._ensure_task_not_cancelled(message, "after-generate")
             finalize_request = self._build_job_posting_finalize_request(
                 message,
                 extracted=extracted,
@@ -340,6 +361,7 @@ class RabbitMqConsumer:
                 classification=classification,
                 generated=generated,
             )
+            self._ensure_task_not_cancelled(message, "before-store")
             self._store_job_posting_result(message, finalize_request)
             pending_entry = self._enqueue_pending_delivery(
                 message=message,
@@ -348,6 +370,7 @@ class RabbitMqConsumer:
                 payload=finalize_request.model_dump(mode="json"),
                 retry_count=message.retryCount,
             )
+            self._ensure_task_not_cancelled(message, "before-delivery")
             delivered = self._deliver_pending_entry(
                 pending_entry,
                 retry_count=message.retryCount,
@@ -371,6 +394,7 @@ class RabbitMqConsumer:
     def _process_analysis_task(self, message: AnalysisTaskMessage) -> None:
         queue_latency_millis = self._compute_queue_latency_millis(message.submittedAt)
         self._ensure_analysis_not_timed_out(queue_latency_millis)
+        self._ensure_task_not_cancelled(message, "before-running")
 
         with bind_log_context(queueLatencyMillis=queue_latency_millis):
             log_info(
@@ -386,6 +410,7 @@ class RabbitMqConsumer:
                     submittedAt=message.submittedAt,
                 ),
             )
+            self._ensure_task_not_cancelled(message, "after-running")
             context = self._api_client.get_analysis_context(
                 AnalysisWorkerContextRequest(
                     taskId=message.taskId,
@@ -394,9 +419,12 @@ class RabbitMqConsumer:
                 )
             )
 
+            self._ensure_task_not_cancelled(message, "before-openai")
             openai_started_at = monotonic()
             llm_response, openai_request_id = self._analysis_openai_worker.analyze(context)
+            self._ensure_task_not_cancelled(message, "after-openai")
             complete_request = self._build_analysis_complete_request(message, llm_response, queue_latency_millis)
+            self._ensure_task_not_cancelled(message, "before-store")
             self._store_analysis_result(message, llm_response)
             pending_entry = self._enqueue_pending_delivery(
                 message=message,
@@ -405,6 +433,7 @@ class RabbitMqConsumer:
                 payload=complete_request.model_dump(mode="json"),
                 retry_count=message.retryCount,
             )
+            self._ensure_task_not_cancelled(message, "before-delivery")
             delivered = self._deliver_pending_entry(
                 pending_entry,
                 retry_count=message.retryCount,
@@ -1068,6 +1097,24 @@ class RabbitMqConsumer:
                 errorCode=task_status.failureReason,
             )
         return True
+
+    def _ensure_task_not_cancelled(
+        self,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+        checkpoint: str,
+    ) -> None:
+        task_status = self._get_task_status(message)
+        status = (task_status.status or "").upper()
+        if status != "CANCELLED":
+            return
+        log_info(
+            logger,
+            "worker.task.cancelled_confirmed",
+            "task 취소 상태를 확인했습니다.",
+            checkpoint=checkpoint,
+            status=task_status.status,
+        )
+        raise CancelledWorkerTask(f"task cancelled at {checkpoint}. taskId={message.taskId}")
 
     def _get_task_status(
         self,

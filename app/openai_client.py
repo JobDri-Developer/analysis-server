@@ -162,6 +162,7 @@ class JobPostingOpenAiWorker:
                 error=str(exc),
             )
             return JobPostingGenerateResponse(
+                postingName=extracted.jobTitle,
                 companyName=extracted.companyName,
                 jobTitle=extracted.jobTitle,
                 task=extracted.task,
@@ -285,6 +286,7 @@ class JobPostingOpenAiWorker:
 반드시 아래 JSON 형식만 반환하세요.
 
 {{
+  "postingName": "string",
   "companyName": "string",
   "jobTitle": "string",
   "task": "string",
