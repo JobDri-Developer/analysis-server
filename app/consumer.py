@@ -63,6 +63,10 @@ logger = logging.getLogger(__name__)
 TERMINAL_TASK_STATUSES = {"FAILED", "SUCCEEDED", "SUCCESS", "COMPLETED", "COMPLETE", "CANCELLED"}
 
 
+class CancelledWorkerTask(Exception):
+    pass
+
+
 class RabbitMqConsumer:
     TERMINAL_TASK_STATUSES = TERMINAL_TASK_STATUSES
 
@@ -265,6 +269,16 @@ class RabbitMqConsumer:
                     taskProcessingLatencyMs=processing_latency_ms,
                 )
                 self._ack_message(channel, method.delivery_tag, reason="processed-successfully", message=message)
+        except CancelledWorkerTask as exc:
+            with bind_log_context(**self._message_log_context(message)):
+                log_info(
+                    logger,
+                    "queue.consume.cancelled",
+                    "취소된 작업이어서 메시지를 ack 처리합니다.",
+                    deliveryTag=getattr(method, "delivery_tag", None),
+                    error=str(exc),
+                )
+                self._ack_message(channel, method.delivery_tag, reason="task-cancelled", message=message)
         except NonRetryableWorkerError as exc:
             with bind_log_context(**self._message_log_context(message, queue_latency_millis=exc.queue_latency_millis)):
                 processing_latency_ms = self._elapsed_millis(processing_started_at) or 0
@@ -891,6 +905,24 @@ class RabbitMqConsumer:
             errorCode=task_status.failureReason,
         )
         return True
+
+    def _ensure_task_not_cancelled(
+        self,
+        message: JobPostingIngestTaskMessage | AnalysisTaskMessage,
+        checkpoint: str,
+    ) -> None:
+        task_status = self._get_task_status(message)
+        status = (task_status.status or "").upper()
+        if status != "CANCELLED":
+            return
+        log_info(
+            logger,
+            "worker.task.cancelled_confirmed",
+            "task 취소 상태를 확인했습니다.",
+            checkpoint=checkpoint,
+            status=task_status.status,
+        )
+        raise CancelledWorkerTask(f"task cancelled at {checkpoint}. taskId={message.taskId}")
 
     def _get_task_status(
         self,

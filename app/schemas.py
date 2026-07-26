@@ -70,6 +70,7 @@ class JobPostingClassificationResultResponse(BaseModel):
 
 
 class JobPostingGenerateResponse(BaseModel):
+    postingName: str = ""
     companyName: str = ""
     jobTitle: str = ""
     task: str = ""
