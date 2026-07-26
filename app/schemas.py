@@ -143,6 +143,7 @@ class JobPostingTaskStatusResponse(BaseModel):
     retryCount: int | None = None
     maxRetryCount: int | None = None
     queueLatencyMillis: int | None = None
+    result: Any | None = None
 
 
 class AnalysisTaskMessage(BaseModel):
@@ -256,6 +257,18 @@ class AnalysisTaskStatusResponse(BaseModel):
     retryCount: int | None = None
     maxRetryCount: int | None = None
     queueLatencyMillis: int | None = None
+    result: Any | None = None
+
+
+class WorkerTaskStoredResultResponse(BaseModel):
+    taskId: str
+    taskType: str | None = None
+    status: str | None = None
+    resultPayload: str
+    attemptCount: int | None = None
+    lastError: str | None = None
+    createdAt: datetime | None = None
+    updatedAt: datetime | None = None
 
 
 DeliveryKind = Literal["ANALYSIS_COMPLETE", "JOB_POSTING_FINALIZE"]
@@ -275,6 +288,17 @@ class PendingDeliveryEntry(BaseModel):
     attemptCount: int = 0
     lastError: str | None = None
     nextAttemptAt: str | None = None
+
+
+class TerminalMessageEntry(BaseModel):
+    version: int = 1
+    taskId: str
+    requestId: str | None = None
+    messageId: str
+    taskType: str
+    retryCount: int = 0
+    failureReason: str
+    recordedAt: str
 
 
 class RetryableWorkerError(Exception):
