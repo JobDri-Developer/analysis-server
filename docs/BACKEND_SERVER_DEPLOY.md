@@ -3,7 +3,7 @@
 ## 서버 배치 방식
 
 - 워커는 레포의 `deploy/docker-compose.worker.prod.yml` 을 서버에 업로드한 뒤 단독으로 관리한다.
-- 워커는 외부 포트를 열지 않고 Spring API와 RabbitMQ에만 연결한다.
+- 워커는 `8000` 포트에서 `/health`, `/metrics` 를 노출한다.
 
 ## 서버에 둘 파일
 
@@ -34,6 +34,7 @@
 - `WORKER_MAX_RETRY_COUNT`
 - `APP_WORKER_ANALYSIS_MAX_RETRY_COUNT`
 - `APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS`
+- `WORKER_METRICS_PORT`
 
 ## 서버에서 수동 배포할 때
 

@@ -7,7 +7,7 @@ class Settings(BaseSettings):
 
     app_name: str = "jobdri-worker"
     environment: str = Field(default="local", alias="WORKER_ENV")
-    worker_log_type: str = Field(default="application", alias="APP_WORKER_LOG_TYPE")
+    worker_log_type: str = Field(default="worker", alias="APP_WORKER_LOG_TYPE")
 
     rabbitmq_host: str = Field(default="localhost", alias="RABBITMQ_HOST")
     rabbitmq_port: int = Field(default=5672, alias="RABBITMQ_PORT")
@@ -31,9 +31,12 @@ class Settings(BaseSettings):
         default="jobdri.analysis.execute.dlq",
         alias="APP_WORKER_ANALYSIS_DLQ",
     )
-    rabbitmq_prefetch_count: int = Field(default=1, alias="WORKER_PREFETCH_COUNT")
+    rabbitmq_prefetch_count: int = Field(default=1, ge=1, alias="WORKER_PREFETCH_COUNT")
+    worker_default_concurrency_limit: int = Field(default=1, ge=1, alias="WORKER_DEFAULT_CONCURRENCY_LIMIT")
+    worker_analysis_concurrency_limit: int = Field(default=1, ge=1, alias="WORKER_ANALYSIS_CONCURRENCY_LIMIT")
+    worker_job_posting_concurrency_limit: int = Field(default=1, ge=1, alias="WORKER_JOB_POSTING_CONCURRENCY_LIMIT")
 
-    spring_api_base_url: str = Field(default="http://localhost:8080", alias="SPRING_API_BASE_URL")
+    spring_api_base_url: str = Field(default="http://api:8080", alias="SPRING_API_BASE_URL")
     spring_internal_api_key: str = Field(alias="APP_WORKER_INTERNAL_API_KEY")
 
     openai_api_key: str = Field(alias="OPENAI_API_KEY")

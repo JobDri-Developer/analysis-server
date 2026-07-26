@@ -4,10 +4,11 @@ import json
 import logging
 import re
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.logging_utils import log_exception
-from app.schemas import PendingDeliveryEntry
+from app.schemas import PendingDeliveryEntry, TerminalMessageEntry
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,26 @@ class PendingDeliveryStore:
                     "worker.recovery.spool.read_failed",
                     "pending delivery spool 파일을 읽지 못했습니다.",
                     path=str(path),
+                    errorCode="RECOVERY_SPOOL_READ_FAILED",
                 )
         return entries
+
+    def get_entry(self, task_id: str, delivery_kind: str) -> PendingDeliveryEntry | None:
+        path = self._path_for_task(task_id, delivery_kind)
+        if not path.exists():
+            return None
+
+        try:
+            return PendingDeliveryEntry.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            log_exception(
+                logger,
+                "worker.recovery.spool.read_failed",
+                "pending delivery spool 파일을 읽지 못했습니다.",
+                path=str(path),
+                errorCode="RECOVERY_SPOOL_READ_FAILED",
+            )
+            return None
 
     def _path_for(self, entry: PendingDeliveryEntry) -> Path:
         return self._path_for_task(entry.taskId, entry.deliveryKind)
@@ -71,18 +90,26 @@ class TerminalMessageStore:
         with self._lock:
             return path.exists()
 
-    def record(self, *, task_id: str, message_id: str, task_type: str, failure_reason: str) -> None:
+    def record(
+        self,
+        *,
+        task_id: str,
+        request_id: str | None,
+        message_id: str,
+        task_type: str,
+        retry_count: int,
+        failure_reason: str,
+    ) -> None:
         path = self._path_for(task_id, message_id)
-        payload = json.dumps(
-            {
-                "taskId": task_id,
-                "messageId": message_id,
-                "taskType": task_type,
-                "failureReason": failure_reason,
-            },
-            ensure_ascii=True,
-            indent=2,
-        )
+        payload = TerminalMessageEntry(
+            taskId=task_id,
+            requestId=request_id,
+            messageId=message_id,
+            taskType=task_type,
+            retryCount=retry_count,
+            failureReason=failure_reason,
+            recordedAt=datetime.now(timezone.utc).isoformat(),
+        ).model_dump_json(indent=2)
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = path.with_suffix(".tmp")
