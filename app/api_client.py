@@ -82,8 +82,17 @@ class SpringWorkerApiClient:
         response = self._get(f"/api/internal/worker/job-postings/tasks/{task_id}")
         return self._parse_result(response, JobPostingTaskStatusResponse)
 
-    def get_context(self, user_id: int, image_object_key: str | None) -> JobPostingWorkerContextResponse:
-        payload = JobPostingWorkerContextRequest(userId=user_id, imageObjectKey=image_object_key).model_dump(mode="json")
+    def get_context(
+        self,
+        user_id: int,
+        image_object_key: str | None,
+        image_object_keys: list[str] | None = None,
+    ) -> JobPostingWorkerContextResponse:
+        payload = JobPostingWorkerContextRequest(
+            userId=user_id,
+            imageObjectKey=image_object_key,
+            imageObjectKeys=image_object_keys,
+        ).model_dump(mode="json")
         response = self._post("/api/internal/worker/job-postings/ingest/context", payload)
         return self._parse_result(response, JobPostingWorkerContextResponse)
 

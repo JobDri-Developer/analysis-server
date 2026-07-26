@@ -29,11 +29,17 @@ class JobPostingOpenAiWorker:
         self._client = OpenAI(api_key=settings.openai_api_key)
         self._model = settings.openai_job_posting_model
 
-    def extract(self, raw_text: str | None, image_url: str | None) -> JobPostingExtractResponse:
-        prompt = self._build_extract_prompt(raw_text or "", image_url is not None)
+    def extract(
+        self,
+        raw_text: str | None,
+        image_url: str | None,
+        image_urls: list[str] | None = None,
+    ) -> JobPostingExtractResponse:
+        normalized_image_urls = self._normalize_image_urls(image_url, image_urls)
+        prompt = self._build_extract_prompt(raw_text or "", bool(normalized_image_urls))
         content = [{"type": "input_text", "text": prompt}]
-        if image_url:
-            content.append({"type": "input_image", "image_url": image_url})
+        for normalized_image_url in normalized_image_urls:
+            content.append({"type": "input_image", "image_url": normalized_image_url})
 
         started_at = monotonic()
         log_info(
@@ -41,7 +47,8 @@ class JobPostingOpenAiWorker:
             "openai.extract.started",
             "OpenAI extract 호출을 시작합니다.",
             model=self._model,
-            hasImage=image_url is not None,
+            hasImage=bool(normalized_image_urls),
+            imageCount=len(normalized_image_urls),
         )
         response = self._create_response(
             input_payload=[{"role": "user", "content": content}],
@@ -76,6 +83,16 @@ class JobPostingOpenAiWorker:
             openaiRequestId=self._extract_request_id(response),
         )
         return result
+
+    def _normalize_image_urls(self, image_url: str | None, image_urls: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        for candidate in [image_url, *(image_urls or [])]:
+            if not candidate:
+                continue
+            stripped = candidate.strip()
+            if stripped and stripped not in normalized:
+                normalized.append(stripped)
+        return normalized[:2]
 
     def classify(
         self,

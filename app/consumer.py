@@ -313,10 +313,10 @@ class RabbitMqConsumer:
             )
 
             self._ensure_task_not_cancelled(message, "after-running")
-            context = self._api_client.get_context(message.userId, message.imageObjectKey)
+            context = self._api_client.get_context(message.userId, message.imageObjectKey, message.imageObjectKeys)
             self._ensure_task_not_cancelled(message, "before-openai")
             openai_started_at = monotonic()
-            extracted = self._openai_worker.extract(message.rawText, context.imageUrl)
+            extracted = self._openai_worker.extract(message.rawText, context.imageUrl, context.imageUrls)
             self._ensure_task_not_cancelled(message, "after-extract")
             candidates = self._api_client.get_candidates(extracted)
             if not candidates:
