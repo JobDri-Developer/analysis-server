@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ApiEnvelope(BaseModel):
@@ -172,6 +172,18 @@ class AnalysisQuestionContextResponse(BaseModel):
     charLimit: int | None = None
 
 
+class SimilarJobPostingContext(BaseModel):
+    jobPostingId: int
+    companyName: str = ""
+    postingName: str = ""
+    jobTitle: str = ""
+    task: str = ""
+    requirements: str = ""
+    preferredQualifications: str = ""
+    similarityRank: int
+    similarityScore: float
+
+
 class AnalysisWorkerContextResponse(BaseModel):
     userId: int
     mockApplyId: int
@@ -184,6 +196,23 @@ class AnalysisWorkerContextResponse(BaseModel):
     middleClassificationName: str
     detailClassificationName: str
     questions: list[AnalysisQuestionContextResponse] = Field(default_factory=list)
+    similarJobPostings: list[SimilarJobPostingContext] = Field(default_factory=list)
+
+    @field_validator("similarJobPostings", mode="before")
+    @classmethod
+    def limit_similar_job_postings(cls, value: object) -> object:
+        if isinstance(value, list):
+            def similarity_rank(item: object) -> int:
+                if isinstance(item, SimilarJobPostingContext):
+                    return item.similarityRank
+                if isinstance(item, dict):
+                    rank = item.get("similarityRank")
+                    if isinstance(rank, int):
+                        return rank
+                return 2**31 - 1
+
+            return sorted(value, key=similarity_rank)[:3]
+        return value
 
 
 class AnalysisWorkerRunningRequest(BaseModel):

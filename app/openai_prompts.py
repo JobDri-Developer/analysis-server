@@ -123,6 +123,7 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
             for question in context.questions
         ]
     )
+    similar_job_posting_block = _build_similar_job_posting_block(context)
     return f"""
 당신은 자기소개서 분석 평가자입니다.
 지원 직무 적합도, 답변의 임팩트, 전체 완성도를 0부터 100 사이 정수로 평가하고,
@@ -196,4 +197,38 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 
 [문항 및 답변]
 {question_block}
+{similar_job_posting_block}
 """.strip()
+
+
+def _build_similar_job_posting_block(context: AnalysisWorkerContextResponse) -> str:
+    similar_job_postings = context.similarJobPostings[:3]
+    if not similar_job_postings:
+        return ""
+
+    references = "\n\n".join(
+        (
+            f"{item.similarityRank}.\n"
+            f"- 회사: {item.companyName}\n"
+            f"- 공고명: {item.postingName}\n"
+            f"- 직무: {item.jobTitle}\n"
+            f"- 주요 업무: {item.task}\n"
+            f"- 자격 요건: {item.requirements}\n"
+            f"- 우대 사항: {item.preferredQualifications}"
+        )
+        for item in similar_job_postings
+    )
+    return f"""
+
+[유사 채용공고 참고 자료]
+{references}
+
+[유사 채용공고 사용 규칙]
+- 현재 분석 대상 채용공고가 항상 최우선 평가 기준이다.
+- 현재 자기소개서 문항과 답변은 유사 채용공고보다 우선한다.
+- 유사 채용공고는 실제 공고 표현과 요구 역량을 이해하기 위한 보조 참고 자료일 뿐이다.
+- 현재 채용공고와 유사 채용공고가 충돌하면 현재 채용공고를 따른다.
+- 유사 채용공고에만 있는 요구사항을 현재 공고의 필수 조건, 누락 키워드 또는 감점 근거로 사용하지 않는다.
+- 유사 채용공고를 근거로 지원자의 경험, 성과, 역할 또는 계획을 추정하거나 만들어내지 않는다.
+- 자기소개서 원문에 없는 사실을 improvement에 추가하지 않는다.
+""".rstrip()

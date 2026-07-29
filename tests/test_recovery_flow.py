@@ -812,7 +812,10 @@ class RecoveryFlowTests(unittest.TestCase):
 
     def test_low_confidence_job_posting_uses_result_then_finalize_instead_of_complete(self) -> None:
         api_client = MagicMock()
-        api_client.get_context.return_value = types.SimpleNamespace(imageUrl="https://example.com/image.png")
+        api_client.get_context.return_value = types.SimpleNamespace(
+            imageUrl="https://example.com/image.png",
+            imageUrls=[],
+        )
         api_client.get_candidates.return_value = [
             JobPostingClassificationCandidateResponse(
                 detailClassificationId=1,
