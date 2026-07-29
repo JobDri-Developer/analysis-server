@@ -1,8 +1,14 @@
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from app.openai_client import JobPostingOpenAiWorker
 from app.openai_prompts import (
     build_job_posting_extract_prompt,
     build_job_posting_generation_prompt,
 )
 from app.openai_response_parser import build_job_posting_generate_fallback
+from app.processors import JobPostingTaskProcessor
 from app.schemas import (
     JobPostingClassificationResultResponse,
     JobPostingExtractResponse,
@@ -48,3 +54,50 @@ def test_generation_fallback_keeps_missing_posting_name_empty() -> None:
     fallback = build_job_posting_generate_fallback(extracted)
 
     assert fallback.postingName == ""
+
+
+def test_final_generation_replaces_model_posting_name_with_extracted_value() -> None:
+    worker = object.__new__(JobPostingOpenAiWorker)
+    worker._task_type = "JOB_POSTING_INGEST"
+    worker._model = "test-model"
+    extracted = JobPostingExtractResponse(
+        postingName="2026 백엔드 개발자 공개채용",
+        companyName="잡드리",
+        jobTitle="백엔드 개발자",
+    )
+    response = SimpleNamespace(
+        output_text=json.dumps(
+            {
+                "postingName": "잡드리 백엔드 채용",
+                "companyName": "잡드리",
+                "jobTitle": "백엔드 개발자",
+            }
+        ),
+        id="response-id",
+    )
+
+    with (
+        patch("app.openai_client.observe_llm_request"),
+        patch("app.openai_client.log_info"),
+    ):
+        result = worker._finalize_generation_response(
+            response=response,
+            operation="job-posting-generate",
+            started_at=0.0,
+            extracted=extracted,
+        )
+
+    assert result.postingName == "2026 백엔드 개발자 공개채용"
+
+
+def test_low_confidence_generation_preserves_extracted_posting_name() -> None:
+    processor = object.__new__(JobPostingTaskProcessor)
+    extracted = JobPostingExtractResponse(
+        postingName="2026 백엔드 개발자 공개채용",
+        companyName="잡드리",
+        jobTitle="백엔드 개발자",
+    )
+
+    generated = processor._build_low_confidence_generated(extracted)
+
+    assert generated.postingName == "2026 백엔드 개발자 공개채용"
