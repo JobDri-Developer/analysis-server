@@ -527,7 +527,7 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
             latencyMs=self._elapsed_millis(started_at),
             openaiRequestId=self._extract_request_id(response),
         )
-        return result
+        return result.model_copy(update={"postingName": extracted.postingName})
 
 class AnalysisOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:

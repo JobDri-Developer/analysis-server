@@ -46,6 +46,7 @@ class JobPostingWorkerRunningRequest(BaseModel):
 
 
 class JobPostingExtractResponse(BaseModel):
+    postingName: str = ""
     companyName: str = ""
     jobTitle: str = ""
     task: str = ""

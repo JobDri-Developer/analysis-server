@@ -11,10 +11,11 @@ from app.schemas import (
 def build_job_posting_extract_prompt(raw_text: str, has_image: bool) -> str:
     return f"""
 이 {"이미지 또는 텍스트" if has_image else "텍스트"}는 채용 공고입니다.
-회사명, 직무명, 주요 업무, 자격 요건, 우대 사항을 추출해주세요.
+공고 제목, 회사명, 직무명, 주요 업무, 자격 요건, 우대 사항을 추출해주세요.
 반드시 아래 JSON 형식만 반환하세요.
 
 {{
+  "postingName": "string",
   "companyName": "string",
   "jobTitle": "string",
   "task": "string",
@@ -23,6 +24,11 @@ def build_job_posting_extract_prompt(raw_text: str, has_image: bool) -> str:
   "rawText": "string",
   "confidence": 0.0
 }}
+
+규칙:
+1. postingName은 원문에 명시된 채용 공고 제목을 그대로 추출하세요.
+2. 원문에 공고 제목이 없거나 확실하지 않으면 postingName은 반드시 빈 문자열로 두세요.
+3. postingName을 회사명과 직무명으로 새로 만들거나 요약하지 마세요.
 
 [채용 공고 텍스트]
 {raw_text}
@@ -77,6 +83,7 @@ def build_job_posting_generation_prompt(
 반드시 JSON만 반환하세요.
 
 {{
+  "postingName": "string",
   "companyName": "string",
   "jobTitle": "string",
   "task": "string",
@@ -86,11 +93,16 @@ def build_job_posting_generation_prompt(
 }}
 
 [추출 결과]
+- 공고명: {extracted.postingName}
 - 회사명: {extracted.companyName}
 - 직무명: {extracted.jobTitle}
 - 주요 업무: {extracted.task}
 - 자격 요건: {extracted.requirements}
 - 우대 사항: {extracted.preferredQualifications}
+
+규칙:
+1. postingName은 추출 결과의 공고명을 그대로 사용하세요.
+2. 추출된 공고명이 빈 문자열이면 postingName을 새로 만들지 말고 빈 문자열로 두세요.
 
 [분류 결과]
 - 대분류: {classification.bigClassificationName}

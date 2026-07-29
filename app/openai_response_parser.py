@@ -39,6 +39,7 @@ def parse_job_posting_generate_response(raw_text: str) -> JobPostingGenerateResp
 
 def build_job_posting_generate_fallback(extracted: JobPostingExtractResponse) -> JobPostingGenerateResponse:
     return JobPostingGenerateResponse(
+        postingName=extracted.postingName,
         companyName=extracted.companyName,
         jobTitle=extracted.jobTitle,
         task=extracted.task,
