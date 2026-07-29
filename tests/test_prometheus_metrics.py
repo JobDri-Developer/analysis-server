@@ -573,9 +573,17 @@ class PrometheusMetricsTests(unittest.TestCase):
         self.assertEqual(cm.exception.failure_reason, "INTERNAL_ERROR")
 
     def test_openai_clients_use_explicit_timeout_from_processing_sla(self) -> None:
-        with patch.object(openai_client_module.settings, "analysis_queue_timeout_millis", 12345), patch(
-            "app.openai_client.OpenAI",
-        ) as openai_mock, patch("app.openai_client.AsyncOpenAI") as async_openai_mock:
+        with patch.object(
+            openai_client_module.settings,
+            "analysis_queue_timeout_millis",
+            12345,
+        ), patch.object(
+            openai_client_module.settings,
+            "openai_api_key",
+            "test-openai-key",
+        ), patch("app.openai_client.OpenAI") as openai_mock, patch(
+            "app.openai_client.AsyncOpenAI",
+        ) as async_openai_mock:
             JobPostingOpenAiWorker()
             AnalysisOpenAiWorker()
 
