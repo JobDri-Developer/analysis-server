@@ -317,6 +317,7 @@ class JobPostingTaskProcessor:
 
     def _build_low_confidence_generated(self, extracted: JobPostingExtractResponse) -> JobPostingGenerateResponse:
         return JobPostingGenerateResponse(
+            postingName=extracted.postingName,
             companyName=extracted.companyName,
             jobTitle=extracted.jobTitle,
             task=extracted.task,
