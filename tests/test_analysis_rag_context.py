@@ -46,7 +46,10 @@ class AnalysisRagContextTest(unittest.TestCase):
 
     def test_similar_job_postings_are_limited_to_top_three(self) -> None:
         context = _base_context(
-            similarJobPostings=[_similar_job_posting(index) for index in range(1, 5)]
+            similarJobPostings=[
+                _similar_job_posting(index)
+                for index in [4, 2, 1, 3]
+            ]
         )
 
         self.assertEqual(
@@ -69,7 +72,10 @@ class AnalysisRagContextTest(unittest.TestCase):
         self.assertIn("지원자의 경험, 성과, 역할 또는 계획을 추정하거나 만들어내지 않는다", prompt)
 
     def test_similar_job_posting_context_does_not_expose_vector_or_owner(self) -> None:
-        context = _base_context(similarJobPostings=[_similar_job_posting(1)])
+        similar_job_posting = _similar_job_posting(1)
+        similar_job_posting["embedding"] = [0.1, 0.2]
+        similar_job_posting["userId"] = 99
+        context = _base_context(similarJobPostings=[similar_job_posting])
         serialized = context.model_dump(mode="json")["similarJobPostings"][0]
 
         self.assertNotIn("embedding", serialized)

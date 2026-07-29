@@ -202,7 +202,16 @@ class AnalysisWorkerContextResponse(BaseModel):
     @classmethod
     def limit_similar_job_postings(cls, value: object) -> object:
         if isinstance(value, list):
-            return value[:3]
+            def similarity_rank(item: object) -> int:
+                if isinstance(item, SimilarJobPostingContext):
+                    return item.similarityRank
+                if isinstance(item, dict):
+                    rank = item.get("similarityRank")
+                    if isinstance(rank, int):
+                        return rank
+                return 2**31 - 1
+
+            return sorted(value, key=similarity_rank)[:3]
         return value
 
 
