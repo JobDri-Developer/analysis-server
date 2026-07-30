@@ -7,6 +7,10 @@ from app.schemas import (
     JobPostingExtractResponse,
 )
 
+MAX_CORPUS_REFERENCE_ITEMS = 8
+MAX_CORPUS_REFERENCE_CONTENT_LENGTH = 1_200
+MAX_CORPUS_REFERENCES_LENGTH = 6_000
+
 
 def build_job_posting_extract_prompt(raw_text: str, has_image: bool) -> str:
     return f"""
@@ -210,14 +214,28 @@ def _build_corpus_reference_block(context: AnalysisWorkerContextResponse) -> str
     if not context.corpusReferences:
         return ""
 
-    references = "\n\n".join(
-        (
+    rendered_references: list[str] = []
+    used_length = 0
+    sorted_references = sorted(context.corpusReferences, key=lambda item: item.rank)
+    for item in sorted_references[:MAX_CORPUS_REFERENCE_ITEMS]:
+        separator_length = 2 if rendered_references else 0
+        available_length = MAX_CORPUS_REFERENCES_LENGTH - used_length - separator_length
+        prefix = (
             f"{item.category} rank={item.rank}\n"
             f"- 제목: {item.title}\n"
-            f"- 내용:\n{item.content}"
+            "- 내용:\n"
         )
-        for item in context.corpusReferences
-    )
+        if available_length <= len(prefix):
+            break
+
+        content = item.content[:MAX_CORPUS_REFERENCE_CONTENT_LENGTH]
+        rendered = prefix + content[:available_length - len(prefix)]
+        rendered_references.append(rendered)
+        used_length += separator_length + len(rendered)
+        if len(rendered) >= available_length:
+            break
+
+    references = "\n\n".join(rendered_references)
     return f"""
 [직무 평가 기준 (Curated Corpus)]
 {references}

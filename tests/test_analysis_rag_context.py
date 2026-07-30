@@ -1,6 +1,11 @@
 import unittest
 
-from app.openai_prompts import build_analysis_prompt
+from app.openai_prompts import (
+    MAX_CORPUS_REFERENCE_CONTENT_LENGTH,
+    MAX_CORPUS_REFERENCES_LENGTH,
+    _build_corpus_reference_block,
+    build_analysis_prompt,
+)
 from app.schemas import AnalysisWorkerContextResponse
 
 
@@ -60,6 +65,7 @@ class AnalysisRagContextTest(unittest.TestCase):
         prompt = build_analysis_prompt(context)
         self.assertNotIn("[직무 평가 기준 (Curated Corpus)]", prompt)
         self.assertNotIn("[유사 채용공고 참고]", prompt)
+        self.assertNotIn("[RAG Context 우선순위 및 사용 규칙]", prompt)
 
     def test_similar_job_postings_are_limited_to_top_three(self) -> None:
         context = _base_context(
@@ -110,6 +116,8 @@ class AnalysisRagContextTest(unittest.TestCase):
         self.assertIn("[직무 평가 기준 (Curated Corpus)]", prompt)
         self.assertIn("참고 회사 - 백엔드 개발자", prompt)
         self.assertIn("자격 요건: Spring Boot", prompt)
+        self.assertIn("[RAG Context 우선순위 및 사용 규칙]", prompt)
+        self.assertIn("현재 분석 대상 채용공고가 항상 최우선 평가 기준이다", prompt)
 
     def test_corpus_and_similar_job_postings_follow_prompt_priority(self) -> None:
         context = _base_context(
@@ -136,6 +144,26 @@ class AnalysisRagContextTest(unittest.TestCase):
             prompt,
         )
         self.assertIn("지원자의 경험, 성과, 역할 또는 계획을 추정하거나 만들어내지 않는다", prompt)
+
+    def test_corpus_references_are_ranked_and_limited_by_prompt_budget(self) -> None:
+        references = []
+        for rank in range(10, 0, -1):
+            reference = _corpus_reference(corpus_id=100 + rank, rank=rank)
+            reference["content"] = f"rank-{rank}-start|" + ("x" * 2_000) + f"|rank-{rank}-end"
+            references.append(reference)
+        context = _base_context(corpusReferences=references)
+
+        block = _build_corpus_reference_block(context)
+        reference_body = block.removeprefix("[직무 평가 기준 (Curated Corpus)]\n")
+
+        self.assertLessEqual(len(reference_body), MAX_CORPUS_REFERENCES_LENGTH)
+        self.assertLess(block.index("rank=1"), block.index("rank=2"))
+        self.assertIn("rank-1-start", block)
+        self.assertNotIn("rank-1-end", block)
+        first_content = block.split("- 내용:\n", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+        self.assertEqual(len(first_content), MAX_CORPUS_REFERENCE_CONTENT_LENGTH)
+        self.assertNotIn("rank=9", block)
+        self.assertNotIn("rank=10", block)
 
 
 if __name__ == "__main__":
