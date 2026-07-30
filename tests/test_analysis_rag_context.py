@@ -36,13 +36,30 @@ def _similar_job_posting(index: int) -> dict[str, object]:
     }
 
 
+def _corpus_reference(
+    corpus_id: int = 11,
+    category: str = "JOB_POSTING",
+    rank: int = 1,
+) -> dict[str, object]:
+    return {
+        "corpusId": corpus_id,
+        "category": category,
+        "title": "참고 회사 - 백엔드 개발자",
+        "content": "주요 업무: API 개발\n자격 요건: Spring Boot",
+        "rank": rank,
+    }
+
+
 class AnalysisRagContextTest(unittest.TestCase):
 
     def test_missing_similar_job_postings_defaults_to_empty_list(self) -> None:
         context = _base_context()
 
+        self.assertEqual(context.corpusReferences, [])
         self.assertEqual(context.similarJobPostings, [])
-        self.assertNotIn("[유사 채용공고 참고 자료]", build_analysis_prompt(context))
+        prompt = build_analysis_prompt(context)
+        self.assertNotIn("[직무 평가 기준 (Curated Corpus)]", prompt)
+        self.assertNotIn("[유사 채용공고 참고]", prompt)
 
     def test_similar_job_postings_are_limited_to_top_three(self) -> None:
         context = _base_context(
@@ -64,11 +81,14 @@ class AnalysisRagContextTest(unittest.TestCase):
 
         self.assertIn("[채용 공고]", prompt)
         self.assertIn("- 주요 업무: 현재 공고 API 개발", prompt)
-        self.assertIn("[유사 채용공고 참고 자료]", prompt)
+        self.assertIn("[유사 채용공고 참고]", prompt)
         self.assertIn("- 주요 업무: 유사 업무 1", prompt)
         self.assertIn("현재 분석 대상 채용공고가 항상 최우선 평가 기준이다", prompt)
-        self.assertIn("현재 자기소개서 문항과 답변은 유사 채용공고보다 우선한다", prompt)
-        self.assertIn("유사 채용공고에만 있는 요구사항을 현재 공고의 필수 조건", prompt)
+        self.assertIn("현재 자기소개서 문항과 답변은 모든 참고 자료보다 우선", prompt)
+        self.assertIn(
+            "Curated Corpus나 Similar JobPosting에만 있는 요구사항을 현재 공고의 필수 조건",
+            prompt,
+        )
         self.assertIn("지원자의 경험, 성과, 역할 또는 계획을 추정하거나 만들어내지 않는다", prompt)
 
     def test_similar_job_posting_context_does_not_expose_vector_or_owner(self) -> None:
@@ -80,6 +100,42 @@ class AnalysisRagContextTest(unittest.TestCase):
 
         self.assertNotIn("embedding", serialized)
         self.assertNotIn("userId", serialized)
+
+    def test_corpus_references_are_parsed_and_rendered_as_job_evaluation_criteria(self) -> None:
+        context = _base_context(corpusReferences=[_corpus_reference()])
+
+        prompt = build_analysis_prompt(context)
+
+        self.assertEqual(context.corpusReferences[0].corpusId, 11)
+        self.assertIn("[직무 평가 기준 (Curated Corpus)]", prompt)
+        self.assertIn("참고 회사 - 백엔드 개발자", prompt)
+        self.assertIn("자격 요건: Spring Boot", prompt)
+
+    def test_corpus_and_similar_job_postings_follow_prompt_priority(self) -> None:
+        context = _base_context(
+            corpusReferences=[_corpus_reference()],
+            similarJobPostings=[_similar_job_posting(1)],
+        )
+
+        prompt = build_analysis_prompt(context)
+
+        self.assertLess(prompt.index("[채용 공고]"), prompt.index("[직무 평가 기준 (Curated Corpus)]"))
+        self.assertLess(
+            prompt.index("[직무 평가 기준 (Curated Corpus)]"),
+            prompt.index("[유사 채용공고 참고]"),
+        )
+        self.assertLess(prompt.index("[유사 채용공고 참고]"), prompt.index("[문항 및 답변]"))
+        self.assertIn("현재 분석 대상 채용공고가 항상 최우선 평가 기준이다", prompt)
+        self.assertIn("Curated Corpus와 Similar JobPosting이 충돌하면 Curated Corpus를 우선한다", prompt)
+        self.assertIn(
+            "현재 채용공고와 Curated Corpus 또는 Similar JobPosting이 충돌하면 현재 채용공고를 따른다",
+            prompt,
+        )
+        self.assertIn(
+            "Curated Corpus나 Similar JobPosting에만 있는 요구사항을 현재 공고의 필수 조건",
+            prompt,
+        )
+        self.assertIn("지원자의 경험, 성과, 역할 또는 계획을 추정하거나 만들어내지 않는다", prompt)
 
 
 if __name__ == "__main__":

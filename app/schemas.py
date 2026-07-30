@@ -184,6 +184,14 @@ class SimilarJobPostingContext(BaseModel):
     similarityScore: float
 
 
+class CorpusReferenceContext(BaseModel):
+    corpusId: int
+    category: str
+    title: str = ""
+    content: str = ""
+    rank: int
+
+
 class AnalysisWorkerContextResponse(BaseModel):
     userId: int
     mockApplyId: int
@@ -196,6 +204,7 @@ class AnalysisWorkerContextResponse(BaseModel):
     middleClassificationName: str
     detailClassificationName: str
     questions: list[AnalysisQuestionContextResponse] = Field(default_factory=list)
+    corpusReferences: list[CorpusReferenceContext] = Field(default_factory=list)
     similarJobPostings: list[SimilarJobPostingContext] = Field(default_factory=list)
 
     @field_validator("similarJobPostings", mode="before")
