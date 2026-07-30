@@ -7,6 +7,10 @@ from app.schemas import (
     JobPostingExtractResponse,
 )
 
+MAX_CORPUS_REFERENCE_ITEMS = 8
+MAX_CORPUS_REFERENCE_CONTENT_LENGTH = 1_200
+MAX_CORPUS_REFERENCES_LENGTH = 6_000
+
 
 def build_job_posting_extract_prompt(raw_text: str, has_image: bool) -> str:
     return f"""
@@ -123,7 +127,9 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
             for question in context.questions
         ]
     )
+    corpus_reference_block = _build_corpus_reference_block(context)
     similar_job_posting_block = _build_similar_job_posting_block(context)
+    rag_priority_block = _build_rag_priority_block(context)
     return f"""
 당신은 자기소개서 분석 평가자입니다.
 지원 직무 적합도, 답변의 임팩트, 전체 완성도를 0부터 100 사이 정수로 평가하고,
@@ -195,9 +201,44 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - 우대 사항: {context.preferredQualifications}
 - 직무 분류: {context.bigClassificationName} > {context.middleClassificationName} > {context.detailClassificationName}
 
+{corpus_reference_block}
+{similar_job_posting_block}
+{rag_priority_block}
+
 [문항 및 답변]
 {question_block}
-{similar_job_posting_block}
+""".strip()
+
+
+def _build_corpus_reference_block(context: AnalysisWorkerContextResponse) -> str:
+    if not context.corpusReferences:
+        return ""
+
+    rendered_references: list[str] = []
+    used_length = 0
+    sorted_references = sorted(context.corpusReferences, key=lambda item: item.rank)
+    for item in sorted_references[:MAX_CORPUS_REFERENCE_ITEMS]:
+        separator_length = 2 if rendered_references else 0
+        available_length = MAX_CORPUS_REFERENCES_LENGTH - used_length - separator_length
+        prefix = (
+            f"{item.category} rank={item.rank}\n"
+            f"- 제목: {item.title}\n"
+            "- 내용:\n"
+        )
+        if available_length <= len(prefix):
+            break
+
+        content = item.content[:MAX_CORPUS_REFERENCE_CONTENT_LENGTH]
+        rendered = prefix + content[:available_length - len(prefix)]
+        rendered_references.append(rendered)
+        used_length += separator_length + len(rendered)
+        if len(rendered) >= available_length:
+            break
+
+    references = "\n\n".join(rendered_references)
+    return f"""
+[직무 평가 기준 (Curated Corpus)]
+{references}
 """.strip()
 
 
@@ -219,16 +260,23 @@ def _build_similar_job_posting_block(context: AnalysisWorkerContextResponse) -> 
         for item in similar_job_postings
     )
     return f"""
-
-[유사 채용공고 참고 자료]
+[유사 채용공고 참고]
 {references}
+""".strip()
 
-[유사 채용공고 사용 규칙]
+
+def _build_rag_priority_block(context: AnalysisWorkerContextResponse) -> str:
+    if not context.corpusReferences and not context.similarJobPostings:
+        return ""
+
+    return """
+[RAG Context 우선순위 및 사용 규칙]
 - 현재 분석 대상 채용공고가 항상 최우선 평가 기준이다.
-- 현재 자기소개서 문항과 답변은 유사 채용공고보다 우선한다.
-- 유사 채용공고는 실제 공고 표현과 요구 역량을 이해하기 위한 보조 참고 자료일 뿐이다.
-- 현재 채용공고와 유사 채용공고가 충돌하면 현재 채용공고를 따른다.
-- 유사 채용공고에만 있는 요구사항을 현재 공고의 필수 조건, 누락 키워드 또는 감점 근거로 사용하지 않는다.
-- 유사 채용공고를 근거로 지원자의 경험, 성과, 역할 또는 계획을 추정하거나 만들어내지 않는다.
+- Curated Corpus는 직무 평가 기준으로만 사용한다.
+- Similar JobPosting은 실제 유사 공고의 표현과 요구 역량을 이해하기 위한 보조 참고 자료로만 사용한다.
+- Curated Corpus와 Similar JobPosting이 충돌하면 Curated Corpus를 우선한다.
+- 현재 채용공고와 Curated Corpus 또는 Similar JobPosting이 충돌하면 현재 채용공고를 따른다.
+- Curated Corpus나 Similar JobPosting에만 있는 요구사항을 현재 공고의 필수 조건, 누락 키워드 또는 감점 근거로 사용하지 않는다.
+- 현재 자기소개서 문항과 답변은 모든 참고 자료보다 우선하며, 참고 자료를 근거로 지원자의 경험, 성과, 역할 또는 계획을 추정하거나 만들어내지 않는다.
 - 자기소개서 원문에 없는 사실을 improvement에 추가하지 않는다.
-""".rstrip()
+""".strip()
