@@ -873,9 +873,8 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 if item.sentence.strip() and item.sentence in answer
             ]
             distinct_sentence_count = len({item.sentence.strip() for item in valid_items})
-            insufficient_coverage = distinct_sentence_count == 0 or (
-                distinct_sentence_count < 2 and self._has_multiple_analysis_sentences(answer)
-            )
+            target_count = self._question_analysis_target_count(answer)
+            insufficient_coverage = distinct_sentence_count < target_count
             missing_improvement = any(
                 item.status in {"mentioned", "fabricated"}
                 and not self._is_usable_improvement(item.sentence, item.improvement)
@@ -885,13 +884,13 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 question_ids.append(question.questionId)
         return question_ids
 
-    def _has_multiple_analysis_sentences(self, answer: str) -> bool:
+    def _question_analysis_target_count(self, answer: str) -> int:
         sentences = [
             sentence.strip()
             for sentence in re.split(r"(?<=[.!?。！？])(?:\s+|$)|\n+", answer)
             if sentence.strip()
         ]
-        return len(sentences) >= 2
+        return min(3, max(1, len(sentences)))
 
     def _merge_recovered_question_analyses(
         self,
@@ -946,6 +945,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 *recovered_by_question_id.get(question.questionId, []),
                 *current_by_question_id.get(question.questionId, []),
             ]
+            valid_candidates: list[AnalysisQuestionAnalysisResponse] = []
             seen_sentences: set[str] = set()
             for item in candidates:
                 sentence_key = item.sentence.strip()
@@ -956,9 +956,40 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 ):
                     continue
                 seen_sentences.add(sentence_key)
-                merged_items.append(item)
-                if len(seen_sentences) == 2:
+                valid_candidates.append(item)
+
+            target_count = self._question_analysis_target_count(question.answer)
+            selected_items: list[AnalysisQuestionAnalysisResponse] = []
+            selected_sentences: set[str] = set()
+            for preferred_status in ("fabricated", "proven", "mentioned"):
+                preferred_item = next(
+                    (
+                        item
+                        for item in valid_candidates
+                        if item.status == preferred_status
+                        and item.sentence.strip() not in selected_sentences
+                    ),
+                    None,
+                )
+                if preferred_item is None:
+                    continue
+                selected_items.append(preferred_item)
+                selected_sentences.add(preferred_item.sentence.strip())
+                if len(selected_items) == target_count:
                     break
+
+            if len(selected_items) < target_count:
+                for item in valid_candidates:
+                    sentence_key = item.sentence.strip()
+                    if sentence_key in selected_sentences:
+                        continue
+                    selected_items.append(item)
+                    selected_sentences.add(sentence_key)
+                    if len(selected_items) == target_count:
+                        break
+
+            selected_items.sort(key=lambda item: question.answer.find(item.sentence))
+            merged_items.extend(selected_items)
 
         merged_items.extend(
             item for item in result.questionAnalyses if item.questionId not in known_question_ids

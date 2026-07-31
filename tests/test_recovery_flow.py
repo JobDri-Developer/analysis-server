@@ -113,6 +113,7 @@ from app.schemas import (
     AnalysisHighlightItem,
     AnalysisLlmResponse,
     AnalysisMissingKeywordItem,
+    AnalysisQuestionAnalysesRecoveryResponse,
     AnalysisQuestionAnalysisResponse,
     AnalysisTaskMessage,
     AnalysisTaskStatusResponse,
@@ -447,10 +448,10 @@ class RecoveryFlowTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("서로 다른 평가 문장이 2개 이상인 모든 입력 문항은 questionAnalyses에 정확히 2개 포함한다", prompt)
-        self.assertIn("유효한 평가 문장이 1개뿐인 문항만 예외적으로 1개를 반환한다", prompt)
+        self.assertIn("서로 다른 평가 문장이 3개 이상이면 questionAnalyses에 정확히 3개 포함한다", prompt)
+        self.assertIn("서로 다른 평가 문장이 2개이면 정확히 2개", prompt)
         self.assertIn("모든 questionId를 빠짐없이 커버해야 한다", prompt)
-        self.assertIn("문항당 최대 2개까지 포함한다", prompt)
+        self.assertIn("문항당 최대 3개까지 포함한다", prompt)
         self.assertIn("비어 있지 않은 모든 문항과 누락 요건, 내부 모순을 함께 반영한다", prompt)
         self.assertIn("일부 핵심 요건이 누락되면 70~84", prompt)
         self.assertIn("동일 프로젝트의 기간·인원·역할이 직접 충돌하면 완성도에 실질적으로 반영한다", prompt)
@@ -460,6 +461,7 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIn("일반적인 proven 문장보다 fabricated 문장을 우선해 반드시 포함한다", prompt)
         self.assertIn("두 문장을 각각 fabricated로 중복 반환하지 말고", prompt)
         self.assertIn("동일 questionId에서는 fabricated를 최대 1개만 반환한다", prompt)
+        self.assertIn("fabricated, proven, mentioned처럼 서로 다른 평가 관점을 우선해 구성", prompt)
         self.assertIn('"status": "proven|mentioned|fabricated"', prompt)
         self.assertIn("status는 proven, mentioned, fabricated 중 하나만 사용한다", prompt)
         self.assertNotIn('"status": "proven|mentioned|missing|fabricated"', prompt)
@@ -611,6 +613,13 @@ class RecoveryFlowTests(unittest.TestCase):
                             "reason": "개선 과정이 부족합니다.",
                             "improvement": "채널별 반응 차이를 콘텐츠 기획에 반영해 캠페인 성과를 개선했습니다.",
                         },
+                        {
+                            "questionId": 1,
+                            "sentence": "반응 차이를 콘텐츠 기획에 반영했습니다.",
+                            "status": "mentioned",
+                            "reason": "반영 결과가 부족합니다.",
+                            "improvement": "채널별 반응 차이를 콘텐츠 기획에 반영해 캠페인 성과를 개선했습니다.",
+                        },
                     ]
                 }
             return types.SimpleNamespace(
@@ -673,7 +682,7 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertNotIn("questionId=2", recovery_call["input"])
         question_one_items = [item for item in result.questionAnalyses if item.questionId == 1]
         question_two_items = [item for item in result.questionAnalyses if item.questionId == 2]
-        self.assertEqual(len(question_one_items), 2)
+        self.assertEqual(len(question_one_items), 3)
         self.assertEqual(len(question_two_items), 2)
         self.assertTrue(all(item.improvement for item in question_one_items))
         self.assertEqual(request_id, "req-1")
@@ -796,6 +805,93 @@ class RecoveryFlowTests(unittest.TestCase):
             items = [item for item in result.questionAnalyses if item.questionId == question_id]
             self.assertEqual(len(items), 2)
             self.assertTrue(all(item.improvement for item in items))
+
+    def test_analysis_merge_prioritizes_fabricated_and_status_diversity_with_three_items(self) -> None:
+        worker = AnalysisOpenAiWorker()
+        context = AnalysisWorkerContextResponse(
+            userId=1,
+            mockApplyId=2,
+            companyName="잡드리",
+            jobTitle="프런트엔드 개발자",
+            task="서비스 개발",
+            requirements="협업 경험",
+            preferredQualifications="",
+            bigClassificationName="개발",
+            middleClassificationName="프런트엔드",
+            detailClassificationName="웹 개발",
+            questions=[
+                AnalysisQuestionContextResponse(
+                    questionId=1,
+                    question="협업 경험을 작성해주세요.",
+                    answer=(
+                        "여섯 명이 함께한 팀 프로젝트였습니다. "
+                        "모든 과정을 혼자 수행한 개인 프로젝트였습니다. "
+                        "렌더링 성능을 개선했습니다. "
+                        "앞으로도 적극적으로 협업하겠습니다."
+                    ),
+                    charLimit=700,
+                )
+            ],
+        )
+        primary = AnalysisLlmResponse(
+            jobFit=80,
+            impact=75,
+            completeness=90,
+            feedback="good",
+            keyStrengths=[],
+            keyWeaknesses=[],
+            missingKeywords=[],
+            questionAnalyses=[
+                AnalysisQuestionAnalysisResponse(
+                    questionId=1,
+                    sentence="모든 과정을 혼자 수행한 개인 프로젝트였습니다.",
+                    status="fabricated",
+                    reason="팀 프로젝트라는 설명과 직접 충돌합니다.",
+                    improvement="팀 프로젝트에서 프런트엔드 개발을 담당했습니다.",
+                )
+            ],
+        )
+        recovered = AnalysisQuestionAnalysesRecoveryResponse(
+            questionAnalyses=[
+                AnalysisQuestionAnalysisResponse(
+                    questionId=1,
+                    sentence="여섯 명이 함께한 팀 프로젝트였습니다.",
+                    status="mentioned",
+                    reason="역할이 부족합니다.",
+                    improvement="여섯 명의 팀 프로젝트에서 프런트엔드 개발을 담당했습니다.",
+                ),
+                AnalysisQuestionAnalysisResponse(
+                    questionId=1,
+                    sentence="렌더링 성능을 개선했습니다.",
+                    status="proven",
+                    reason="구체적인 개선 행동입니다.",
+                    improvement=None,
+                ),
+                AnalysisQuestionAnalysisResponse(
+                    questionId=1,
+                    sentence="앞으로도 적극적으로 협업하겠습니다.",
+                    status="mentioned",
+                    reason="실행 방법이 부족합니다.",
+                    improvement="팀원과 진행 상황을 공유하며 협업하겠습니다.",
+                ),
+            ]
+        )
+
+        result = worker._merge_recovered_question_analyses(context, primary, recovered, [1])
+
+        self.assertEqual(len(result.questionAnalyses), 3)
+        self.assertEqual(
+            {item.status for item in result.questionAnalyses},
+            {"fabricated", "proven", "mentioned"},
+        )
+        self.assertEqual(
+            [item.sentence for item in result.questionAnalyses],
+            [
+                "여섯 명이 함께한 팀 프로젝트였습니다.",
+                "모든 과정을 혼자 수행한 개인 프로젝트였습니다.",
+                "렌더링 성능을 개선했습니다.",
+            ],
+        )
 
     def test_analysis_rejects_meta_advice_as_improvement(self) -> None:
         worker = AnalysisOpenAiWorker()
@@ -1787,6 +1883,13 @@ class AnalysisAsyncStructuredOutputTests(unittest.IsolatedAsyncioTestCase):
                         "reason": "개선 과정이 부족합니다.",
                         "improvement": "채널별 반응 차이를 반영해 캠페인 성과를 개선했습니다.",
                     },
+                    {
+                        "questionId": 1,
+                        "sentence": "반응 차이를 콘텐츠 기획에 반영했습니다.",
+                        "status": "mentioned",
+                        "reason": "반영 결과가 부족합니다.",
+                        "improvement": "반응 차이를 콘텐츠 기획에 반영해 캠페인 성과를 개선했습니다.",
+                    },
                 ]
             return types.SimpleNamespace(
                 output_text=json.dumps(
@@ -1850,7 +1953,7 @@ class AnalysisAsyncStructuredOutputTests(unittest.IsolatedAsyncioTestCase):
             captured_calls[0]["text"]["format"]["name"],  # type: ignore[index]
             "analysis_question_analyses_recovery",
         )
-        self.assertEqual(len(result.questionAnalyses), 2)
+        self.assertEqual(len(result.questionAnalyses), 3)
         self.assertTrue(all(item.improvement for item in result.questionAnalyses))
 
 
