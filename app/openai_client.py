@@ -47,6 +47,17 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _analysis_response_text_config() -> dict[str, Any]:
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "analysis_response",
+            "schema": AnalysisLlmResponse.model_json_schema(),
+            "strict": True,
+        }
+    }
+
+
 def _processing_sla_timeout_seconds() -> float:
     return max(settings.analysis_queue_timeout_millis / 1000, 1.0)
 
@@ -572,6 +583,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 model=self._model,
                 temperature=0.2,
                 input=prompt,
+                text=_analysis_response_text_config(),
             )
         except Exception as exc:
             self._raise_create_response_error(
@@ -627,6 +639,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                     model=self._model,
                     temperature=0.2,
                     input=prompt,
+                    text=_analysis_response_text_config(),
                 )
             )
         except Exception as exc:

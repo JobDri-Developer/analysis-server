@@ -156,7 +156,7 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
   "missingKeywords": [
     {{
       "keyword": "JD에는 있지만 답변에서 충분히 드러나지 않은 짧은 역량/요건",
-      "source": "qualification|preference|mainTask"
+      "source": "qualification|mainTask"
     }}
   ],
   "questionAnalyses": [
@@ -165,33 +165,58 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
       "sentence": "string",
       "status": "proven|mentioned|fabricated",
       "reason": "string",
-      "improvement": "string"
+      "improvement": null
     }}
   ]
 }}
 
 [판정 규칙]
 - jobFit, impact, completeness는 0부터 100 사이 정수만 사용한다.
+- jobFit은 JD의 핵심 업무·필수요건 대부분을 직접 증명해야 85 이상, 주요 요건을 증명하되 일부 핵심 요건이 누락되면 70~84, 일부만 증명하면 55~69로 평가한다.
+- impact는 주요 주장 대부분에 구체적인 행동·결과가 있어야 70 이상이며, 관련 경험을 일반적으로 언급한 문장이 섞이면 그 비중을 반영한다.
+- completeness는 질문 적합성, 논리 흐름, 표현의 일관성을 평가한다. 동일 프로젝트의 기간·인원·역할이 직접 충돌하면 완성도에 실질적으로 반영한다.
+- 일부 좋은 문장만 보고 전체 점수를 정하지 말고 비어 있지 않은 모든 문항과 누락 요건, 내부 모순을 함께 반영한다.
+- 수치가 없다는 이유만으로 감점하지 않으며, 구체적인 행동과 결과가 있으면 수치 없이도 proven이 될 수 있다.
+- 포부와 향후 계획은 과거 성과 수치를 요구하지 않고 실행 대상, 방법, 직무 연결성으로 평가한다.
 - questionAnalyses의 questionId는 입력된 questionId 중 하나만 사용한다.
 - questionAnalyses의 sentence는 반드시 해당 questionId의 answer에 실제 포함된 정확한 substring이어야 한다.
 - answer가 비어 있지 않은 모든 입력 문항은 questionAnalyses에 최소 1개 이상 포함한다.
 - questionAnalyses는 비어 있지 않은 answer를 가진 모든 questionId를 빠짐없이 커버해야 한다.
 - 각 문항에서 가장 평가 가치가 큰 실제 문장 1개를 우선 선택하고, 필요하면 문항당 최대 2개까지 포함한다.
-- 강한 긍정 근거가 부족한 문항도 생략하지 말고, 해당 answer의 실제 문장 1개를 골라 mentioned 또는 fabricated로 평가한다.
+- 문장 선택 전에 같은 answer 안에서 동일한 프로젝트·경력·성과를 가리키는 기간, 인원, 역할, 수치가 함께 성립할 수 있는지 교차 확인한다.
+- 동일 대상을 설명하는 두 진술이 직접 충돌하면 일반적인 proven 문장보다 fabricated 문장을 우선해 반드시 포함한다.
+- 하나의 직접 충돌을 이루는 두 문장을 각각 fabricated로 중복 반환하지 말고, 충돌을 가장 분명히 보여 주는 문장 하나만 대표로 선택한다.
+- 동일 questionId에서는 fabricated를 최대 1개만 반환한다.
+- 각 문항의 대표 문장은 근거 수준과 사실 정합성에 따라 proven, mentioned 또는 fabricated로 평가한다.
 - 원문 매칭이 불확실하면 문장을 요약하거나 재작성하지 말고, 해당 answer에서 더 짧고 정확히 일치하는 substring을 다시 선택한다.
 - status는 proven, mentioned, fabricated 중 하나만 사용한다.
 - proven: 답변에 구체적인 근거, 행동, 결과가 충분히 드러남
 - mentioned: 관련 키워드나 경험은 있으나 구체적인 근거, 에피소드, 결과가 부족함
-- fabricated: 답변에 없는 내용을 있는 것처럼 주장하거나 과장 위험이 큼
+- fabricated: JD 또는 답변 내부의 명시적 사실과 직접 충돌하거나, 하지 않았다고 밝힌 경험을 했다고 주장함
+- 단순한 근거 부족, 수치 부족, 과장 가능성만으로 fabricated를 사용하지 않고 mentioned를 사용한다.
+- fabricated의 reason에는 어떤 두 사실이 "직접 충돌합니다"라고 명시한다.
+- proven의 improvement는 null로 반환한다.
+- mentioned 또는 fabricated도 원문 정보만으로 안전한 대체 문장을 만들 수 없으면 improvement는 null로 반환한다.
 - 관련 언급이 전혀 없는 missing 사례는 원문 sentence가 없으므로 questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다.
 - keyStrengths와 keyWeaknesses는 각각 최대 3개이며, 없으면 []로 출력한다.
 - keyStrengths의 quote는 자소서 answer에 실제 포함된 substring만 사용한다.
 - missingKeywords는 최대 3개이며, 없으면 []로 출력한다.
-- missingKeywords의 source는 qualification, preference, mainTask 중 하나만 사용한다.
+- missingKeywords는 mainTask 또는 qualification에 있는 핵심 경험형 요건만 사용하고, preference에만 있는 항목은 제외한다.
+- 같은 요건이 mainTask와 preference에 모두 있으면 source는 mainTask를 사용한다.
+- missingKeywords의 source는 mainTask 또는 qualification만 사용한다.
+- JD의 한 문구에 여러 개념이 결합돼 있어도 답변이 그 핵심 행동을 실질적으로 다루면, 일부 단어가 없다는 이유로 전체 문구를 missing으로 판정하지 않는다.
+- missingKeywords를 확정하기 전에 비어 있지 않은 모든 답변을 다시 확인하고, 동일 키워드뿐 아니라 명확한 동의 표현과 실제 수행 행동도 언급으로 인정한다.
 - keyWeaknesses의 첫 항목들은 가능하면 missingKeywords와 같은 누락 요건을 다룬다.
 - missingKeywords 기반 keyWeaknesses의 quote는 JD의 주요 업무, 자격 요건, 우대 사항에 실제 포함된 표현을 사용한다.
 - missingKeywords가 없으면 keyWeaknesses는 questionAnalyses의 보완 대상 문장 quote를 우선 사용한다.
 - 모든 title은 한 문장으로 짧게 작성한다.
+
+[상태 판정 예시]
+- proven 예시: "로그를 분석해 재시도 정책을 수정했고 오류율을 4%에서 1%로 낮췄습니다."처럼 행동과 결과가 구체적인 문장
+- mentioned 예시: "고객 데이터를 활용해 성과를 개선했습니다."처럼 관련 경험은 있지만 대상, 방법, 결과가 부족한 문장
+- fabricated 예시: 같은 프로젝트를 앞에서는 "2개월 개인 프로젝트"라고 하고 뒤에서는 "5개월간 4명이 수행한 팀 프로젝트"라고 한 경우. 두 진술이 직접 충돌한다고 설명한다.
+- missing 예시: JD의 mainTask에 "재고 예측 모델 운영"이 있으나 모든 답변에 관련 언급이 없다면 questionAnalyses가 아니라 missingKeywords에 넣는다.
+- 예시는 의미 기준만 보여 주며, 실제 입력에 없는 문장이나 상태를 만들기 위해 복사하지 않는다.
 
 [채용 공고]
 - 회사명: {context.companyName}
