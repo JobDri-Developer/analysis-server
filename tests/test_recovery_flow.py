@@ -431,13 +431,26 @@ class RecoveryFlowTests(unittest.TestCase):
                         answer="",
                         charLimit=700,
                     ),
+                    AnalysisQuestionContextResponse(
+                        questionId=13,
+                        question="협업 경험을 작성해주세요.",
+                        answer="기획자와 API 명세를 조율했습니다.",
+                        charLimit=700,
+                    ),
+                    AnalysisQuestionContextResponse(
+                        questionId=14,
+                        question="REST API 경험을 작성해주세요.",
+                        answer="REST API 설계와 구현을 직접 수행했습니다.",
+                        charLimit=700,
+                    ),
                 ],
             )
         )
 
-        self.assertIn("모든 입력 문항은 questionAnalyses에 최소 1개 이상 포함한다", prompt)
+        self.assertIn("answer가 비어 있지 않은 모든 입력 문항은 questionAnalyses에 최소 1개 이상 포함한다", prompt)
         self.assertIn("모든 questionId를 빠짐없이 커버해야 한다", prompt)
         self.assertIn("문항당 최대 2개까지 포함한다", prompt)
+        self.assertIn("비어 있지 않은 모든 문항과 누락 요건, 내부 모순을 함께 반영한다", prompt)
         self.assertIn("일부 핵심 요건이 누락되면 70~84", prompt)
         self.assertIn("동일 프로젝트의 기간·인원·역할이 직접 충돌하면 완성도에 실질적으로 반영한다", prompt)
         self.assertIn("구체적인 행동과 결과가 있으면 수치 없이도 proven이 될 수 있다", prompt)
@@ -455,9 +468,10 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIn('fabricated의 reason에는 어떤 두 사실이 "직접 충돌합니다"라고 명시한다', prompt)
         self.assertIn("preference에만 있는 항목은 제외한다", prompt)
         self.assertIn("같은 요건이 mainTask와 preference에 모두 있으면 source는 mainTask를 사용한다", prompt)
-        self.assertIn("세 답변 전체를 다시 확인하고", prompt)
+        self.assertIn("비어 있지 않은 모든 답변을 다시 확인하고", prompt)
         self.assertIn("[상태 판정 예시]", prompt)
         self.assertIn("questionId=12\n  question=추가로 강조하고 싶은 내용을 작성해주세요.\n  answer=\n  charLimit=700", prompt)
+        self.assertIn("questionId=14\n  question=REST API 경험을 작성해주세요.\n  answer=REST API 설계와 구현을 직접 수행했습니다.", prompt)
 
     def test_analysis_openai_call_uses_strict_structured_output_schema(self) -> None:
         captured_kwargs: dict[str, object] = {}
@@ -1393,6 +1407,88 @@ class RecoveryFlowTests(unittest.TestCase):
             self.assertEqual(channel.nacked_delivery_tags, [])
             self.assertEqual(channel.published_messages, [])
             self.assertEqual(api_client.fail_analysis_calls, [])
+
+
+class AnalysisAsyncStructuredOutputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_analysis_async_openai_call_uses_strict_structured_output_schema(self) -> None:
+        captured_kwargs: dict[str, object] = {}
+
+        async def create_response(**kwargs: object) -> object:
+            captured_kwargs.update(kwargs)
+            return types.SimpleNamespace(
+                output_text=json.dumps(
+                    {
+                        "jobFit": 80,
+                        "impact": 75,
+                        "completeness": 90,
+                        "feedback": "good",
+                        "keyStrengths": [],
+                        "keyWeaknesses": [],
+                        "missingKeywords": [],
+                        "questionAnalyses": [
+                            {
+                                "questionId": 1,
+                                "sentence": "구체적인 결과를 만들었습니다.",
+                                "status": "proven",
+                                "reason": "행동과 결과가 구체적입니다.",
+                                "improvement": None,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                usage=None,
+                _request_id="req-async-structured-output",
+            )
+
+        worker = AnalysisOpenAiWorker()
+        worker._async_client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=create_response)
+        )
+        context = AnalysisWorkerContextResponse(
+            userId=1,
+            mockApplyId=2,
+            companyName="잡드리",
+            jobTitle="백엔드 개발자",
+            task="API 개발",
+            requirements="Spring Boot",
+            preferredQualifications="",
+            bigClassificationName="개발",
+            middleClassificationName="서버",
+            detailClassificationName="백엔드",
+            questions=[
+                AnalysisQuestionContextResponse(
+                    questionId=1,
+                    question="성과를 작성해주세요.",
+                    answer="구체적인 결과를 만들었습니다.",
+                    charLimit=700,
+                )
+            ],
+        )
+
+        result, request_id = await worker.analyze_async(context)
+
+        response_format = captured_kwargs["text"]["format"]  # type: ignore[index]
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertEqual(response_format["name"], "analysis_response")
+        self.assertTrue(response_format["strict"])
+        self.assertFalse(response_format["schema"]["additionalProperties"])
+        self.assertEqual(
+            set(response_format["schema"]["required"]),
+            {
+                "jobFit",
+                "impact",
+                "completeness",
+                "feedback",
+                "keyStrengths",
+                "keyWeaknesses",
+                "missingKeywords",
+                "questionAnalyses",
+            },
+        )
+        self.assertEqual(result.questionAnalyses[0].status, "proven")
+        self.assertIsNone(result.questionAnalyses[0].improvement)
+        self.assertEqual(request_id, "req-async-structured-output")
 
 
 if __name__ == "__main__":

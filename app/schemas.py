@@ -251,15 +251,15 @@ class AnalysisMissingKeywordItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     keyword: str
-    source: Literal["qualification", "preference", "mainTask"]
+    source: Literal["qualification", "mainTask"]
 
 
 class AnalysisLlmResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    jobFit: int
-    impact: int
-    completeness: int
+    jobFit: int = Field(ge=0, le=100)
+    impact: int = Field(ge=0, le=100)
+    completeness: int = Field(ge=0, le=100)
     feedback: str
     keyStrengths: list[AnalysisHighlightItem]
     keyWeaknesses: list[AnalysisHighlightItem]

@@ -156,7 +156,7 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
   "missingKeywords": [
     {{
       "keyword": "JD에는 있지만 답변에서 충분히 드러나지 않은 짧은 역량/요건",
-      "source": "qualification|preference|mainTask"
+      "source": "qualification|mainTask"
     }}
   ],
   "questionAnalyses": [
@@ -175,7 +175,7 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - jobFit은 JD의 핵심 업무·필수요건 대부분을 직접 증명해야 85 이상, 주요 요건을 증명하되 일부 핵심 요건이 누락되면 70~84, 일부만 증명하면 55~69로 평가한다.
 - impact는 주요 주장 대부분에 구체적인 행동·결과가 있어야 70 이상이며, 관련 경험을 일반적으로 언급한 문장이 섞이면 그 비중을 반영한다.
 - completeness는 질문 적합성, 논리 흐름, 표현의 일관성을 평가한다. 동일 프로젝트의 기간·인원·역할이 직접 충돌하면 완성도에 실질적으로 반영한다.
-- 일부 좋은 문장만 보고 전체 점수를 정하지 말고 세 문항과 누락 요건, 내부 모순을 함께 반영한다.
+- 일부 좋은 문장만 보고 전체 점수를 정하지 말고 비어 있지 않은 모든 문항과 누락 요건, 내부 모순을 함께 반영한다.
 - 수치가 없다는 이유만으로 감점하지 않으며, 구체적인 행동과 결과가 있으면 수치 없이도 proven이 될 수 있다.
 - 포부와 향후 계획은 과거 성과 수치를 요구하지 않고 실행 대상, 방법, 직무 연결성으로 평가한다.
 - questionAnalyses의 questionId는 입력된 questionId 중 하나만 사용한다.
@@ -205,7 +205,7 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - 같은 요건이 mainTask와 preference에 모두 있으면 source는 mainTask를 사용한다.
 - missingKeywords의 source는 mainTask 또는 qualification만 사용한다.
 - JD의 한 문구에 여러 개념이 결합돼 있어도 답변이 그 핵심 행동을 실질적으로 다루면, 일부 단어가 없다는 이유로 전체 문구를 missing으로 판정하지 않는다.
-- missingKeywords를 확정하기 전에 세 답변 전체를 다시 확인하고, 동일 키워드뿐 아니라 명확한 동의 표현과 실제 수행 행동도 언급으로 인정한다.
+- missingKeywords를 확정하기 전에 비어 있지 않은 모든 답변을 다시 확인하고, 동일 키워드뿐 아니라 명확한 동의 표현과 실제 수행 행동도 언급으로 인정한다.
 - keyWeaknesses의 첫 항목들은 가능하면 missingKeywords와 같은 누락 요건을 다룬다.
 - missingKeywords 기반 keyWeaknesses의 quote는 JD의 주요 업무, 자격 요건, 우대 사항에 실제 포함된 표현을 사용한다.
 - missingKeywords가 없으면 keyWeaknesses는 questionAnalyses의 보완 대상 문장 quote를 우선 사용한다.
