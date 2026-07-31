@@ -4,6 +4,7 @@ import json
 
 from app.schemas import (
     AnalysisLlmResponse,
+    AnalysisQuestionAnalysesRecoveryResponse,
     JobPostingClassificationCandidateResponse,
     JobPostingClassificationResultResponse,
     JobPostingExtractResponse,
@@ -51,6 +52,12 @@ def build_job_posting_generate_fallback(extracted: JobPostingExtractResponse) ->
 
 def parse_analysis_response(raw_text: str) -> AnalysisLlmResponse:
     return AnalysisLlmResponse.model_validate(parse_json_object(raw_text))
+
+
+def parse_analysis_question_analyses_recovery_response(
+    raw_text: str,
+) -> AnalysisQuestionAnalysesRecoveryResponse:
+    return AnalysisQuestionAnalysesRecoveryResponse.model_validate(parse_json_object(raw_text))
 
 
 def parse_json_object(raw_text: str) -> dict:

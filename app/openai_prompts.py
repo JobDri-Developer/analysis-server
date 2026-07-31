@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from app.schemas import (
+    AnalysisQuestionAnalysisResponse,
     AnalysisWorkerContextResponse,
     JobPostingClassificationCandidateResponse,
     JobPostingClassificationResultResponse,
@@ -180,9 +183,10 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - 포부와 향후 계획은 과거 성과 수치를 요구하지 않고 실행 대상, 방법, 직무 연결성으로 평가한다.
 - questionAnalyses의 questionId는 입력된 questionId 중 하나만 사용한다.
 - questionAnalyses의 sentence는 반드시 해당 questionId의 answer에 실제 포함된 정확한 substring이어야 한다.
-- answer가 비어 있지 않은 모든 입력 문항은 questionAnalyses에 최소 1개 이상 포함한다.
+- answer가 비어 있지 않고 서로 다른 평가 문장이 2개 이상인 모든 입력 문항은 questionAnalyses에 정확히 2개 포함한다.
+- 유효한 평가 문장이 1개뿐인 문항만 예외적으로 1개를 반환한다.
 - questionAnalyses는 비어 있지 않은 answer를 가진 모든 questionId를 빠짐없이 커버해야 한다.
-- 각 문항에서 가장 평가 가치가 큰 실제 문장 1개를 우선 선택하고, 필요하면 문항당 최대 2개까지 포함한다.
+- 각 문항에서 서로 다른 평가 관점을 보여 주는 실제 문장을 문항당 최대 2개까지 포함한다.
 - 문장 선택 전에 같은 answer 안에서 동일한 프로젝트·경력·성과를 가리키는 기간, 인원, 역할, 수치가 함께 성립할 수 있는지 교차 확인한다.
 - 동일 대상을 설명하는 두 진술이 직접 충돌하면 일반적인 proven 문장보다 fabricated 문장을 우선해 반드시 포함한다.
 - 하나의 직접 충돌을 이루는 두 문장을 각각 fabricated로 중복 반환하지 말고, 충돌을 가장 분명히 보여 주는 문장 하나만 대표로 선택한다.
@@ -196,7 +200,9 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - 단순한 근거 부족, 수치 부족, 과장 가능성만으로 fabricated를 사용하지 않고 mentioned를 사용한다.
 - fabricated의 reason에는 어떤 두 사실이 "직접 충돌합니다"라고 명시한다.
 - proven의 improvement는 null로 반환한다.
-- mentioned 또는 fabricated도 원문 정보만으로 안전한 대체 문장을 만들 수 없으면 improvement는 null로 반환한다.
+- mentioned 또는 fabricated는 같은 answer에 있는 사실과 표현만 사용해 바로 교체 가능한 완성 문장을 우선 작성한다.
+- mentioned 또는 fabricated의 improvement는 새 수치·경력·역할을 만들지 않고도 안전하게 개선할 수 있으면 반드시 문자열로 반환한다.
+- 같은 answer의 사실만으로도 안전한 대체 문장을 만들 수 없는 경우에만 improvement를 null로 반환한다.
 - 관련 언급이 전혀 없는 missing 사례는 원문 sentence가 없으므로 questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다.
 - keyStrengths와 keyWeaknesses는 각각 최대 3개이며, 없으면 []로 출력한다.
 - keyStrengths의 quote는 자소서 answer에 실제 포함된 substring만 사용한다.
@@ -231,6 +237,82 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 {rag_priority_block}
 
 [문항 및 답변]
+{question_block}
+""".strip()
+
+
+def build_analysis_question_analyses_recovery_prompt(
+    context: AnalysisWorkerContextResponse,
+    question_ids: list[int],
+    current_analyses: list[AnalysisQuestionAnalysisResponse],
+) -> str:
+    selected_question_ids = set(question_ids)
+    selected_questions = [
+        question for question in context.questions if question.questionId in selected_question_ids
+    ]
+    question_block = "\n\n".join(
+        (
+            f"- questionId={question.questionId}\n"
+            f"  question={question.question}\n"
+            f"  answer={question.answer}\n"
+            f"  charLimit={question.charLimit}"
+        )
+        for question in selected_questions
+    )
+    existing_block = json.dumps(
+        [
+            item.model_dump(mode="json")
+            for item in current_analyses
+            if item.questionId in selected_question_ids
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+    return f"""
+당신은 자기소개서 문항별 분석 복구 평가자입니다.
+아래 선택 문항만 다시 검토하여 questionAnalyses를 JSON으로 반환하세요.
+
+반드시 아래 스키마만 반환하세요.
+{{
+  "questionAnalyses": [
+    {{
+      "questionId": 1,
+      "sentence": "해당 answer에 실제 포함된 정확한 부분 문자열",
+      "status": "proven|mentioned|fabricated",
+      "reason": "판정 근거",
+      "improvement": null
+    }}
+  ]
+}}
+
+[복구 규칙]
+- 선택된 각 문항의 answer에 서로 다른 평가 문장이 2개 이상이면 정확히 2개를 반환한다.
+- 유효한 평가 문장이 1개뿐인 경우에만 1개를 반환한다.
+- 선택되지 않은 questionId는 절대 반환하지 않는다.
+- sentence는 반드시 같은 questionId의 answer에 실제 포함된 정확한 substring이어야 한다.
+- 같은 문장을 중복 반환하지 않는다.
+- 기존 분석은 유지하거나 더 정확한 status, reason, improvement로 교체할 수 있다.
+- status는 proven, mentioned, fabricated 중 하나만 사용한다.
+- proven은 구체적인 행동·근거·결과가 충분한 문장이며 improvement는 null이다.
+- mentioned는 관련 내용은 있으나 대상·방법·근거·결과가 부족한 문장이다.
+- fabricated는 답변 내부의 명시적 사실이 서로 직접 충돌하거나 하지 않은 일을 했다고 주장한 문장이다.
+- fabricated의 reason에는 충돌하는 두 사실을 밝히고 반드시 "직접 충돌합니다"라는 표현을 포함한다.
+- 단순히 수치나 설명이 부족한 문장을 fabricated로 판정하지 않는다.
+- mentioned 또는 fabricated는 같은 answer에 이미 있는 사실만 사용해 바로 교체 가능한 완성 문장을 우선 작성한다.
+- 새 수치·기간·인원·역할·경험을 만들지 않고 안전하게 개선할 수 있으면 improvement를 반드시 문자열로 반환한다.
+- 같은 answer의 사실만으로 안전한 대체 문장을 만들 수 없는 경우에만 improvement를 null로 반환한다.
+- improvement는 첨삭 조언이나 설명이 아니라 사용자가 그대로 바꿔 쓸 수 있는 자기소개서 문장이어야 한다.
+
+[직무 정보]
+- 회사명: {context.companyName}
+- 직무명: {context.jobTitle}
+- 주요 업무: {context.task}
+- 자격 요건: {context.requirements}
+
+[현재 분석]
+{existing_block}
+
+[다시 검토할 문항]
 {question_block}
 """.strip()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from time import monotonic
 from typing import Any
 
@@ -11,6 +12,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, BadReque
 from app.async_utils import await_if_needed
 from app.error_codes import FailureReasonCode, classify_openai_failure
 from app.openai_prompts import (
+    build_analysis_question_analyses_recovery_prompt,
     build_analysis_prompt,
     build_job_posting_classification_prompt,
     build_job_posting_extract_prompt,
@@ -19,6 +21,7 @@ from app.openai_prompts import (
 from app.openai_response_parser import (
     build_job_posting_classification_fallback,
     build_job_posting_generate_fallback,
+    parse_analysis_question_analyses_recovery_response,
     parse_analysis_response,
     parse_job_posting_classification_response,
     parse_job_posting_extract_response,
@@ -35,6 +38,8 @@ from app.logging_utils import log_info, log_warning
 from app.metrics import increment_llm_request_error, observe_llm_request
 from app.schemas import (
     AnalysisLlmResponse,
+    AnalysisQuestionAnalysesRecoveryResponse,
+    AnalysisQuestionAnalysisResponse,
     AnalysisWorkerContextResponse,
     JobPostingClassificationCandidateResponse,
     JobPostingClassificationResultResponse,
@@ -53,6 +58,17 @@ def _analysis_response_text_config() -> dict[str, Any]:
             "type": "json_schema",
             "name": "analysis_response",
             "schema": AnalysisLlmResponse.model_json_schema(),
+            "strict": True,
+        }
+    }
+
+
+def _analysis_question_analyses_recovery_text_config() -> dict[str, Any]:
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "analysis_question_analyses_recovery",
+            "schema": AnalysisQuestionAnalysesRecoveryResponse.model_json_schema(),
             "strict": True,
         }
     }
@@ -609,6 +625,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 **usage_fields,
             )
             observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            result = self._recover_question_analyses(context, result)
             return result, request_id
         except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
@@ -666,6 +683,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 **usage_fields,
             )
             observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            result = await self._recover_question_analyses_async(context, result)
             return result, request_id
         except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
@@ -676,6 +694,251 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
                 openai_request_id=self._extract_request_id(exc),
             ) from exc
+
+    def _recover_question_analyses(
+        self,
+        context: AnalysisWorkerContextResponse,
+        result: AnalysisLlmResponse,
+    ) -> AnalysisLlmResponse:
+        question_ids = self._question_ids_requiring_recovery(context, result)
+        if not question_ids:
+            return result
+
+        operation = "analysis-recovery"
+        prompt = build_analysis_question_analyses_recovery_prompt(
+            context,
+            question_ids,
+            result.questionAnalyses,
+        )
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.analysis_recovery.started",
+            "문항별 분석 복구 호출을 시작합니다.",
+            model=self._model,
+            operation=operation,
+            questionIds=question_ids,
+        )
+        try:
+            response = self._client.responses.create(
+                model=self._model,
+                temperature=0.1,
+                input=prompt,
+                text=_analysis_question_analyses_recovery_text_config(),
+            )
+            recovered = parse_analysis_question_analyses_recovery_response(response.output_text)
+        except Exception as exc:
+            self._log_analysis_recovery_failure(started_at, operation, question_ids, exc)
+            return result
+
+        merged = self._merge_recovered_question_analyses(context, result, recovered, question_ids)
+        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+        log_info(
+            logger,
+            "openai.analysis_recovery.completed",
+            "문항별 분석 복구 호출이 완료되었습니다.",
+            model=self._model,
+            operation=operation,
+            latencyMs=self._elapsed_millis(started_at),
+            openaiRequestId=self._extract_request_id(response),
+            questionIds=question_ids,
+            recoveredAnalysisCount=len(recovered.questionAnalyses),
+            mergedAnalysisCount=len(merged.questionAnalyses),
+            **self._extract_usage_fields(response),
+        )
+        return merged
+
+    async def _recover_question_analyses_async(
+        self,
+        context: AnalysisWorkerContextResponse,
+        result: AnalysisLlmResponse,
+    ) -> AnalysisLlmResponse:
+        question_ids = self._question_ids_requiring_recovery(context, result)
+        if not question_ids:
+            return result
+
+        operation = "analysis-recovery"
+        prompt = build_analysis_question_analyses_recovery_prompt(
+            context,
+            question_ids,
+            result.questionAnalyses,
+        )
+        started_at = monotonic()
+        log_info(
+            logger,
+            "openai.analysis_recovery.started",
+            "문항별 분석 복구 호출을 시작합니다.",
+            model=self._model,
+            operation=operation,
+            questionIds=question_ids,
+        )
+        try:
+            response = await await_if_needed(
+                self._async_client.responses.create(
+                    model=self._model,
+                    temperature=0.1,
+                    input=prompt,
+                    text=_analysis_question_analyses_recovery_text_config(),
+                )
+            )
+            recovered = parse_analysis_question_analyses_recovery_response(response.output_text)
+        except Exception as exc:
+            self._log_analysis_recovery_failure(started_at, operation, question_ids, exc)
+            return result
+
+        merged = self._merge_recovered_question_analyses(context, result, recovered, question_ids)
+        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+        log_info(
+            logger,
+            "openai.analysis_recovery.completed",
+            "문항별 분석 복구 호출이 완료되었습니다.",
+            model=self._model,
+            operation=operation,
+            latencyMs=self._elapsed_millis(started_at),
+            openaiRequestId=self._extract_request_id(response),
+            questionIds=question_ids,
+            recoveredAnalysisCount=len(recovered.questionAnalyses),
+            mergedAnalysisCount=len(merged.questionAnalyses),
+            **self._extract_usage_fields(response),
+        )
+        return merged
+
+    def _question_ids_requiring_recovery(
+        self,
+        context: AnalysisWorkerContextResponse,
+        result: AnalysisLlmResponse,
+    ) -> list[int]:
+        analyses_by_question_id: dict[int, list[AnalysisQuestionAnalysisResponse]] = {}
+        for item in result.questionAnalyses:
+            analyses_by_question_id.setdefault(item.questionId, []).append(item)
+
+        question_ids: list[int] = []
+        for question in context.questions:
+            answer = question.answer.strip()
+            if not answer:
+                continue
+            valid_items = [
+                item
+                for item in analyses_by_question_id.get(question.questionId, [])
+                if item.sentence.strip() and item.sentence in answer
+            ]
+            distinct_sentence_count = len({item.sentence.strip() for item in valid_items})
+            insufficient_coverage = distinct_sentence_count == 0 or (
+                distinct_sentence_count < 2 and self._has_multiple_analysis_sentences(answer)
+            )
+            missing_improvement = any(
+                item.status in {"mentioned", "fabricated"}
+                and (item.improvement is None or not item.improvement.strip())
+                for item in valid_items
+            )
+            if insufficient_coverage or missing_improvement:
+                question_ids.append(question.questionId)
+        return question_ids
+
+    def _has_multiple_analysis_sentences(self, answer: str) -> bool:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])(?:\s+|$)|\n+", answer)
+            if sentence.strip()
+        ]
+        return len(sentences) >= 2
+
+    def _merge_recovered_question_analyses(
+        self,
+        context: AnalysisWorkerContextResponse,
+        result: AnalysisLlmResponse,
+        recovered: AnalysisQuestionAnalysesRecoveryResponse,
+        question_ids: list[int],
+    ) -> AnalysisLlmResponse:
+        target_ids = set(question_ids)
+        answers_by_question_id = {
+            question.questionId: question.answer
+            for question in context.questions
+            if question.questionId in target_ids
+        }
+        current_by_question_id: dict[int, list[AnalysisQuestionAnalysisResponse]] = {}
+        for item in result.questionAnalyses:
+            current_by_question_id.setdefault(item.questionId, []).append(item)
+        recovered_by_question_id: dict[int, list[AnalysisQuestionAnalysisResponse]] = {}
+        for item in recovered.questionAnalyses:
+            answer = answers_by_question_id.get(item.questionId)
+            if answer is None or not item.sentence.strip() or item.sentence not in answer:
+                continue
+            current_match = next(
+                (
+                    current
+                    for current in current_by_question_id.get(item.questionId, [])
+                    if current.sentence.strip() == item.sentence.strip()
+                ),
+                None,
+            )
+            if (
+                current_match is not None
+                and current_match.status == item.status
+                and item.status in {"mentioned", "fabricated"}
+                and (item.improvement is None or not item.improvement.strip())
+                and current_match.improvement is not None
+                and current_match.improvement.strip()
+            ):
+                item = item.model_copy(update={"improvement": current_match.improvement})
+            recovered_by_question_id.setdefault(item.questionId, []).append(item)
+
+        merged_items: list[AnalysisQuestionAnalysisResponse] = []
+        known_question_ids = {question.questionId for question in context.questions}
+        for question in context.questions:
+            if question.questionId not in target_ids:
+                merged_items.extend(current_by_question_id.get(question.questionId, []))
+                continue
+
+            candidates = [
+                *recovered_by_question_id.get(question.questionId, []),
+                *current_by_question_id.get(question.questionId, []),
+            ]
+            seen_sentences: set[str] = set()
+            for item in candidates:
+                sentence_key = item.sentence.strip()
+                if (
+                    not sentence_key
+                    or item.sentence not in question.answer
+                    or sentence_key in seen_sentences
+                ):
+                    continue
+                seen_sentences.add(sentence_key)
+                merged_items.append(item)
+                if len(seen_sentences) == 2:
+                    break
+
+        merged_items.extend(
+            item for item in result.questionAnalyses if item.questionId not in known_question_ids
+        )
+        return result.model_copy(update={"questionAnalyses": merged_items})
+
+    def _log_analysis_recovery_failure(
+        self,
+        started_at: float,
+        operation: str,
+        question_ids: list[int],
+        exc: Exception,
+    ) -> None:
+        failure_reason = (
+            FailureReasonCode.VALIDATION_ERROR
+            if isinstance(exc, (ValidationError, json.JSONDecodeError, TypeError, ValueError))
+            else classify_openai_failure(exc)
+        )
+        increment_llm_request_error(self._task_type, operation, failure_reason.value)
+        observe_llm_request(self._task_type, operation, "failed", self._elapsed_seconds(started_at))
+        log_warning(
+            logger,
+            "openai.analysis_recovery.failed",
+            "문항별 분석 복구 호출에 실패해 1차 결과를 유지합니다.",
+            model=self._model,
+            operation=operation,
+            latencyMs=self._elapsed_millis(started_at),
+            openaiRequestId=self._extract_request_id(exc),
+            questionIds=question_ids,
+            errorCode=failure_reason.value,
+            error=str(exc),
+        )
 
     def _extract_usage_fields(self, response: object) -> dict[str, int]:
         usage = getattr(response, "usage", None)

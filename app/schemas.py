@@ -240,6 +240,12 @@ class AnalysisQuestionAnalysisResponse(BaseModel):
     improvement: str | None
 
 
+class AnalysisQuestionAnalysesRecoveryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    questionAnalyses: list[AnalysisQuestionAnalysisResponse]
+
+
 class AnalysisHighlightItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

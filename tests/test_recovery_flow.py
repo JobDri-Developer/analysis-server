@@ -447,7 +447,8 @@ class RecoveryFlowTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("answer가 비어 있지 않은 모든 입력 문항은 questionAnalyses에 최소 1개 이상 포함한다", prompt)
+        self.assertIn("서로 다른 평가 문장이 2개 이상인 모든 입력 문항은 questionAnalyses에 정확히 2개 포함한다", prompt)
+        self.assertIn("유효한 평가 문장이 1개뿐인 문항만 예외적으로 1개를 반환한다", prompt)
         self.assertIn("모든 questionId를 빠짐없이 커버해야 한다", prompt)
         self.assertIn("문항당 최대 2개까지 포함한다", prompt)
         self.assertIn("비어 있지 않은 모든 문항과 누락 요건, 내부 모순을 함께 반영한다", prompt)
@@ -466,6 +467,7 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertIn("questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다", prompt)
         self.assertIn("단순한 근거 부족, 수치 부족, 과장 가능성만으로 fabricated를 사용하지 않고 mentioned를 사용한다", prompt)
         self.assertIn('fabricated의 reason에는 어떤 두 사실이 "직접 충돌합니다"라고 명시한다', prompt)
+        self.assertIn("안전하게 개선할 수 있으면 반드시 문자열로 반환한다", prompt)
         self.assertIn("preference에만 있는 항목은 제외한다", prompt)
         self.assertIn("같은 요건이 mainTask와 preference에 모두 있으면 source는 mainTask를 사용한다", prompt)
         self.assertIn("비어 있지 않은 모든 답변을 다시 확인하고", prompt)
@@ -552,6 +554,129 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertEqual(result.questionAnalyses[0].status, "proven")
         self.assertIsNone(result.questionAnalyses[0].improvement)
         self.assertEqual(request_id, "req-structured-output")
+
+    def test_analysis_recovers_only_questions_with_insufficient_coverage_or_improvement(self) -> None:
+        captured_calls: list[dict[str, object]] = []
+
+        def create_response(**kwargs: object) -> object:
+            captured_calls.append(dict(kwargs))
+            format_name = kwargs["text"]["format"]["name"]  # type: ignore[index]
+            if format_name == "analysis_response":
+                payload = {
+                    "jobFit": 80,
+                    "impact": 75,
+                    "completeness": 90,
+                    "feedback": "good",
+                    "keyStrengths": [],
+                    "keyWeaknesses": [],
+                    "missingKeywords": [],
+                    "questionAnalyses": [
+                        {
+                            "questionId": 1,
+                            "sentence": "고객 데이터를 분석했습니다.",
+                            "status": "mentioned",
+                            "reason": "분석 방법이 부족합니다.",
+                            "improvement": None,
+                        },
+                        {
+                            "questionId": 2,
+                            "sentence": "API를 개발했습니다.",
+                            "status": "proven",
+                            "reason": "구현 행동이 드러납니다.",
+                            "improvement": None,
+                        },
+                        {
+                            "questionId": 2,
+                            "sentence": "응답 시간을 단축했습니다.",
+                            "status": "proven",
+                            "reason": "성과가 드러납니다.",
+                            "improvement": None,
+                        },
+                    ],
+                }
+            else:
+                payload = {
+                    "questionAnalyses": [
+                        {
+                            "questionId": 1,
+                            "sentence": "고객 데이터를 분석했습니다.",
+                            "status": "mentioned",
+                            "reason": "분석 방법과 결과가 부족합니다.",
+                            "improvement": "고객 데이터를 채널별로 분석해 반응 차이를 확인했습니다.",
+                        },
+                        {
+                            "questionId": 1,
+                            "sentence": "캠페인 성과를 개선했습니다.",
+                            "status": "mentioned",
+                            "reason": "개선 과정이 부족합니다.",
+                            "improvement": "채널별 반응 차이를 콘텐츠 기획에 반영해 캠페인 성과를 개선했습니다.",
+                        },
+                    ]
+                }
+            return types.SimpleNamespace(
+                output_text=json.dumps(payload, ensure_ascii=False),
+                usage=None,
+                _request_id=f"req-{len(captured_calls)}",
+            )
+
+        worker = AnalysisOpenAiWorker()
+        worker._client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=create_response)
+        )
+        context = AnalysisWorkerContextResponse(
+            userId=1,
+            mockApplyId=2,
+            companyName="잡드리",
+            jobTitle="백엔드 개발자",
+            task="API 개발",
+            requirements="Spring Boot",
+            preferredQualifications="",
+            bigClassificationName="개발",
+            middleClassificationName="서버",
+            detailClassificationName="백엔드",
+            questions=[
+                AnalysisQuestionContextResponse(
+                    questionId=1,
+                    question="데이터 활용 경험을 작성해주세요.",
+                    answer=(
+                        "고객 데이터를 분석했습니다. 채널별 반응 차이를 확인했습니다. "
+                        "캠페인 성과를 개선했습니다. 반응 차이를 콘텐츠 기획에 반영했습니다."
+                    ),
+                    charLimit=700,
+                ),
+                AnalysisQuestionContextResponse(
+                    questionId=2,
+                    question="개발 성과를 작성해주세요.",
+                    answer="API를 개발했습니다. 응답 시간을 단축했습니다.",
+                    charLimit=700,
+                ),
+            ],
+        )
+
+        result, request_id = worker.analyze(context)
+
+        self.assertEqual(len(captured_calls), 2)
+        recovery_call = captured_calls[1]
+        self.assertEqual(
+            recovery_call["text"]["format"]["name"],  # type: ignore[index]
+            "analysis_question_analyses_recovery",
+        )
+        self.assertTrue(recovery_call["text"]["format"]["strict"])  # type: ignore[index]
+        self.assertFalse(
+            recovery_call["text"]["format"]["schema"]["additionalProperties"]  # type: ignore[index]
+        )
+        self.assertEqual(
+            set(recovery_call["text"]["format"]["schema"]["required"]),  # type: ignore[index]
+            {"questionAnalyses"},
+        )
+        self.assertIn("questionId=1", recovery_call["input"])
+        self.assertNotIn("questionId=2", recovery_call["input"])
+        question_one_items = [item for item in result.questionAnalyses if item.questionId == 1]
+        question_two_items = [item for item in result.questionAnalyses if item.questionId == 2]
+        self.assertEqual(len(question_one_items), 2)
+        self.assertEqual(len(question_two_items), 2)
+        self.assertTrue(all(item.improvement for item in question_one_items))
+        self.assertEqual(request_id, "req-1")
 
     def test_analysis_usage_fields_include_token_counts(self) -> None:
         worker = AnalysisOpenAiWorker()
@@ -1489,6 +1614,92 @@ class AnalysisAsyncStructuredOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.questionAnalyses[0].status, "proven")
         self.assertIsNone(result.questionAnalyses[0].improvement)
         self.assertEqual(request_id, "req-async-structured-output")
+
+    async def test_analysis_async_recovers_question_coverage_and_improvement(self) -> None:
+        captured_kwargs: dict[str, object] = {}
+
+        async def create_response(**kwargs: object) -> object:
+            captured_kwargs.update(kwargs)
+            return types.SimpleNamespace(
+                output_text=json.dumps(
+                    {
+                        "questionAnalyses": [
+                            {
+                                "questionId": 1,
+                                "sentence": "고객 데이터를 분석했습니다.",
+                                "status": "mentioned",
+                                "reason": "분석 방법이 부족합니다.",
+                                "improvement": "고객 데이터를 채널별로 분석해 반응 차이를 확인했습니다.",
+                            },
+                            {
+                                "questionId": 1,
+                                "sentence": "캠페인 성과를 개선했습니다.",
+                                "status": "mentioned",
+                                "reason": "개선 과정이 부족합니다.",
+                                "improvement": "채널별 반응 차이를 콘텐츠 기획에 반영해 캠페인 성과를 개선했습니다.",
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                usage=None,
+                _request_id="req-async-recovery",
+            )
+
+        worker = AnalysisOpenAiWorker()
+        worker._async_client = types.SimpleNamespace(
+            responses=types.SimpleNamespace(create=create_response)
+        )
+        context = AnalysisWorkerContextResponse(
+            userId=1,
+            mockApplyId=2,
+            companyName="잡드리",
+            jobTitle="B2B 마케터",
+            task="리드 확보",
+            requirements="데이터 분석",
+            preferredQualifications="",
+            bigClassificationName="사업",
+            middleClassificationName="마케팅",
+            detailClassificationName="B2B 마케팅",
+            questions=[
+                AnalysisQuestionContextResponse(
+                    questionId=1,
+                    question="데이터 활용 경험을 작성해주세요.",
+                    answer=(
+                        "고객 데이터를 분석했습니다. 채널별 반응 차이를 확인했습니다. "
+                        "캠페인 성과를 개선했습니다. 반응 차이를 콘텐츠 기획에 반영했습니다."
+                    ),
+                    charLimit=700,
+                )
+            ],
+        )
+        primary = AnalysisLlmResponse(
+            jobFit=80,
+            impact=75,
+            completeness=90,
+            feedback="good",
+            keyStrengths=[],
+            keyWeaknesses=[],
+            missingKeywords=[],
+            questionAnalyses=[
+                AnalysisQuestionAnalysisResponse(
+                    questionId=1,
+                    sentence="고객 데이터를 분석했습니다.",
+                    status="mentioned",
+                    reason="분석 방법이 부족합니다.",
+                    improvement=None,
+                )
+            ],
+        )
+
+        result = await worker._recover_question_analyses_async(context, primary)
+
+        self.assertEqual(
+            captured_kwargs["text"]["format"]["name"],  # type: ignore[index]
+            "analysis_question_analyses_recovery",
+        )
+        self.assertEqual(len(result.questionAnalyses), 2)
+        self.assertTrue(all(item.improvement for item in result.questionAnalyses))
 
 
 if __name__ == "__main__":
