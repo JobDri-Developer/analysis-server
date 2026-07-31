@@ -576,7 +576,7 @@ class RecoveryFlowTests(unittest.TestCase):
                             "sentence": "고객 데이터를 분석했습니다.",
                             "status": "mentioned",
                             "reason": "분석 방법이 부족합니다.",
-                            "improvement": None,
+                            "improvement": "구체적인 분석 방법을 추가하면 좋습니다.",
                         },
                         {
                             "questionId": 2,
@@ -677,6 +677,28 @@ class RecoveryFlowTests(unittest.TestCase):
         self.assertEqual(len(question_two_items), 2)
         self.assertTrue(all(item.improvement for item in question_one_items))
         self.assertEqual(request_id, "req-1")
+
+    def test_analysis_rejects_meta_advice_as_improvement(self) -> None:
+        worker = AnalysisOpenAiWorker()
+
+        self.assertFalse(
+            worker._is_usable_improvement(
+                "성과를 개선했습니다.",
+                "구체적인 성과 수치를 추가하면 좋습니다.",
+            )
+        )
+        self.assertFalse(
+            worker._is_usable_improvement(
+                "개인 프로젝트였습니다.",
+                "팀 프로젝트에서의 역할을 강조하는 방향으로 수정할 수 있습니다.",
+            )
+        )
+        self.assertTrue(
+            worker._is_usable_improvement(
+                "성과를 개선했습니다.",
+                "채널별 반응 차이를 콘텐츠 기획에 반영해 캠페인 성과를 개선했습니다.",
+            )
+        )
 
     def test_analysis_usage_fields_include_token_counts(self) -> None:
         worker = AnalysisOpenAiWorker()
