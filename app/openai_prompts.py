@@ -203,6 +203,8 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - mentioned 또는 fabricated는 같은 answer에 있는 사실과 표현만 사용해 바로 교체 가능한 완성 문장을 우선 작성한다.
 - mentioned 또는 fabricated의 improvement는 새 수치·경력·역할을 만들지 않고도 안전하게 개선할 수 있으면 반드시 문자열로 반환한다.
 - 같은 answer의 사실만으로도 안전한 대체 문장을 만들 수 없는 경우에만 improvement를 null로 반환한다.
+- improvement에 "추가하면 좋습니다", "수정할 수 있습니다", "보완해야 합니다", "강조하는 방향" 같은 첨삭 조언을 쓰지 않는다.
+- improvement는 원문 대신 바로 붙여 넣을 수 있도록 지원자의 행동이나 계획을 직접 서술한다.
 - 관련 언급이 전혀 없는 missing 사례는 원문 sentence가 없으므로 questionAnalyses에는 사용하지 말고 missingKeywords와 keyWeaknesses로만 표현한다.
 - keyStrengths와 keyWeaknesses는 각각 최대 3개이며, 없으면 []로 출력한다.
 - keyStrengths의 quote는 자소서 answer에 실제 포함된 substring만 사용한다.
@@ -302,6 +304,8 @@ def build_analysis_question_analyses_recovery_prompt(
 - 새 수치·기간·인원·역할·경험을 만들지 않고 안전하게 개선할 수 있으면 improvement를 반드시 문자열로 반환한다.
 - 같은 answer의 사실만으로 안전한 대체 문장을 만들 수 없는 경우에만 improvement를 null로 반환한다.
 - improvement는 첨삭 조언이나 설명이 아니라 사용자가 그대로 바꿔 쓸 수 있는 자기소개서 문장이어야 한다.
+- improvement에 "추가하면 좋습니다", "수정할 수 있습니다", "보완해야 합니다", "강조하는 방향" 같은 첨삭 조언을 쓰지 않는다.
+- improvement는 "저는", "프로젝트에서", "입사 후"처럼 지원자의 행동이나 계획을 직접 서술하는 형태로 작성한다.
 
 [직무 정보]
 - 회사명: {context.companyName}

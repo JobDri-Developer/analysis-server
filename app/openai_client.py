@@ -626,6 +626,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
             )
             observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
             result = self._recover_question_analyses(context, result)
+            result = self._sanitize_analysis_improvements(result)
             return result, request_id
         except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
@@ -684,6 +685,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
             )
             observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
             result = await self._recover_question_analyses_async(context, result)
+            result = self._sanitize_analysis_improvements(result)
             return result, request_id
         except (BadRequestError, ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             increment_llm_request_error(self._task_type, operation, FailureReasonCode.VALIDATION_ERROR.value)
@@ -828,7 +830,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
             )
             missing_improvement = any(
                 item.status in {"mentioned", "fabricated"}
-                and (item.improvement is None or not item.improvement.strip())
+                and not self._is_usable_improvement(item.sentence, item.improvement)
                 for item in valid_items
             )
             if insufficient_coverage or missing_improvement:
@@ -876,9 +878,11 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 current_match is not None
                 and current_match.status == item.status
                 and item.status in {"mentioned", "fabricated"}
-                and (item.improvement is None or not item.improvement.strip())
-                and current_match.improvement is not None
-                and current_match.improvement.strip()
+                and not self._is_usable_improvement(item.sentence, item.improvement)
+                and self._is_usable_improvement(
+                    current_match.sentence,
+                    current_match.improvement,
+                )
             ):
                 item = item.model_copy(update={"improvement": current_match.improvement})
             recovered_by_question_id.setdefault(item.questionId, []).append(item)
@@ -912,6 +916,42 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
             item for item in result.questionAnalyses if item.questionId not in known_question_ids
         )
         return result.model_copy(update={"questionAnalyses": merged_items})
+
+    def _sanitize_analysis_improvements(
+        self,
+        result: AnalysisLlmResponse,
+    ) -> AnalysisLlmResponse:
+        sanitized_items = [
+            item.model_copy(update={"improvement": None})
+            if item.status == "proven"
+            or not self._is_usable_improvement(item.sentence, item.improvement)
+            else item
+            for item in result.questionAnalyses
+        ]
+        return result.model_copy(update={"questionAnalyses": sanitized_items})
+
+    def _is_usable_improvement(self, sentence: str, improvement: str | None) -> bool:
+        if improvement is None or not improvement.strip():
+            return False
+        compact_sentence = re.sub(r"\s+", "", sentence)
+        compact_improvement = re.sub(r"\s+", "", improvement)
+        if compact_sentence == compact_improvement:
+            return False
+        meta_terms = (
+            "추가하면좋",
+            "추가할수있",
+            "수정할수있",
+            "수정하는방향",
+            "보완하면좋",
+            "보완해야",
+            "강조하는방향",
+            "작성하면좋",
+            "작성해야",
+            "구체적으로작성",
+            "구체적으로추가",
+            "명확히설명",
+        )
+        return not any(term in compact_improvement for term in meta_terms)
 
     def _log_analysis_recovery_failure(
         self,
