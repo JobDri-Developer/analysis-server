@@ -183,14 +183,15 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - 포부와 향후 계획은 과거 성과 수치를 요구하지 않고 실행 대상, 방법, 직무 연결성으로 평가한다.
 - questionAnalyses의 questionId는 입력된 questionId 중 하나만 사용한다.
 - questionAnalyses의 sentence는 반드시 해당 questionId의 answer에 실제 포함된 정확한 substring이어야 한다.
-- answer가 비어 있지 않고 서로 다른 평가 문장이 2개 이상인 모든 입력 문항은 questionAnalyses에 정확히 2개 포함한다.
-- 유효한 평가 문장이 1개뿐인 문항만 예외적으로 1개를 반환한다.
+- answer에 서로 다른 평가 문장이 3개 이상이면 questionAnalyses에 정확히 3개 포함한다.
+- 서로 다른 평가 문장이 2개이면 정확히 2개, 유효한 평가 문장이 1개뿐이면 1개를 반환한다.
 - questionAnalyses는 비어 있지 않은 answer를 가진 모든 questionId를 빠짐없이 커버해야 한다.
-- 각 문항에서 서로 다른 평가 관점을 보여 주는 실제 문장을 문항당 최대 2개까지 포함한다.
+- 각 문항에서 서로 다른 평가 관점을 보여 주는 실제 문장을 문항당 최대 3개까지 포함한다.
 - 문장 선택 전에 같은 answer 안에서 동일한 프로젝트·경력·성과를 가리키는 기간, 인원, 역할, 수치가 함께 성립할 수 있는지 교차 확인한다.
 - 동일 대상을 설명하는 두 진술이 직접 충돌하면 일반적인 proven 문장보다 fabricated 문장을 우선해 반드시 포함한다.
 - 하나의 직접 충돌을 이루는 두 문장을 각각 fabricated로 중복 반환하지 말고, 충돌을 가장 분명히 보여 주는 문장 하나만 대표로 선택한다.
 - 동일 questionId에서는 fabricated를 최대 1개만 반환한다.
+- 가능한 경우 fabricated, proven, mentioned처럼 서로 다른 평가 관점을 우선해 구성하고, 같은 status만 반복하지 않는다.
 - 각 문항의 대표 문장은 근거 수준과 사실 정합성에 따라 proven, mentioned 또는 fabricated로 평가한다.
 - 원문 매칭이 불확실하면 문장을 요약하거나 재작성하지 말고, 해당 answer에서 더 짧고 정확히 일치하는 substring을 다시 선택한다.
 - status는 proven, mentioned, fabricated 중 하나만 사용한다.
@@ -288,12 +289,14 @@ def build_analysis_question_analyses_recovery_prompt(
 }}
 
 [복구 규칙]
-- 선택된 각 문항의 answer에 서로 다른 평가 문장이 2개 이상이면 정확히 2개를 반환한다.
-- 유효한 평가 문장이 1개뿐인 경우에만 1개를 반환한다.
+- 선택된 각 문항의 answer에 서로 다른 평가 문장이 3개 이상이면 정확히 3개를 반환한다.
+- 서로 다른 평가 문장이 2개이면 정확히 2개, 유효한 평가 문장이 1개뿐이면 1개를 반환한다.
 - 선택되지 않은 questionId는 절대 반환하지 않는다.
 - sentence는 반드시 같은 questionId의 answer에 실제 포함된 정확한 substring이어야 한다.
 - 같은 문장을 중복 반환하지 않는다.
 - 기존 분석은 유지하거나 더 정확한 status, reason, improvement로 교체할 수 있다.
+- 동일 대상을 설명하는 진술이 직접 충돌하면 fabricated를 다른 status보다 우선해 반드시 포함한다.
+- 가능한 경우 fabricated, proven, mentioned처럼 서로 다른 평가 관점을 우선해 구성하고, 같은 status만 반복하지 않는다.
 - status는 proven, mentioned, fabricated 중 하나만 사용한다.
 - proven은 구체적인 행동·근거·결과가 충분한 문장이며 improvement는 null이다.
 - mentioned는 관련 내용은 있으나 대상·방법·근거·결과가 부족한 문장이다.
