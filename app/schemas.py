@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ApiEnvelope(BaseModel):
@@ -231,32 +231,40 @@ class AnalysisWorkerRunningRequest(BaseModel):
 
 
 class AnalysisQuestionAnalysisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     questionId: int
     sentence: str
-    status: str
+    status: Literal["proven", "mentioned", "fabricated"]
     reason: str
-    improvement: str
+    improvement: str | None
 
 
 class AnalysisHighlightItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str
     quote: str
 
 
 class AnalysisMissingKeywordItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     keyword: str
-    source: str
+    source: Literal["qualification", "preference", "mainTask"]
 
 
 class AnalysisLlmResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     jobFit: int
     impact: int
     completeness: int
     feedback: str
-    keyStrengths: list[AnalysisHighlightItem] = Field(default_factory=list)
-    keyWeaknesses: list[AnalysisHighlightItem] = Field(default_factory=list)
-    missingKeywords: list[AnalysisMissingKeywordItem] = Field(default_factory=list)
-    questionAnalyses: list[AnalysisQuestionAnalysisResponse] = Field(default_factory=list)
+    keyStrengths: list[AnalysisHighlightItem]
+    keyWeaknesses: list[AnalysisHighlightItem]
+    missingKeywords: list[AnalysisMissingKeywordItem]
+    questionAnalyses: list[AnalysisQuestionAnalysisResponse]
 
 
 class AnalysisWorkerRetryRequest(BaseModel):
