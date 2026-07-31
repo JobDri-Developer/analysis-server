@@ -707,47 +707,71 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
             return result
 
         operation = "analysis-recovery"
-        prompt = build_analysis_question_analyses_recovery_prompt(
-            context,
-            question_ids,
-            result.questionAnalyses,
-        )
-        started_at = monotonic()
-        log_info(
-            logger,
-            "openai.analysis_recovery.started",
-            "문항별 분석 복구 호출을 시작합니다.",
-            model=self._model,
-            operation=operation,
-            questionIds=question_ids,
-        )
-        try:
-            response = self._client.responses.create(
-                model=self._model,
-                temperature=0.1,
-                input=prompt,
-                text=_analysis_question_analyses_recovery_text_config(),
+        merged = result
+        recovery_batches = [question_ids]
+        batch_index = 0
+        while batch_index < len(recovery_batches):
+            target_ids = recovery_batches[batch_index]
+            targeted_retry = batch_index > 0
+            batch_index += 1
+            prompt = build_analysis_question_analyses_recovery_prompt(
+                context,
+                target_ids,
+                merged.questionAnalyses,
             )
-            recovered = parse_analysis_question_analyses_recovery_response(response.output_text)
-        except Exception as exc:
-            self._log_analysis_recovery_failure(started_at, operation, question_ids, exc)
-            return result
+            started_at = monotonic()
+            log_info(
+                logger,
+                "openai.analysis_recovery.started",
+                "문항별 분석 복구 호출을 시작합니다.",
+                model=self._model,
+                operation=operation,
+                questionIds=target_ids,
+                targetedRetry=targeted_retry,
+            )
+            try:
+                response = self._client.responses.create(
+                    model=self._model,
+                    temperature=0.1,
+                    input=prompt,
+                    text=_analysis_question_analyses_recovery_text_config(),
+                )
+                recovered = parse_analysis_question_analyses_recovery_response(response.output_text)
+            except Exception as exc:
+                self._log_analysis_recovery_failure(started_at, operation, target_ids, exc)
+                if not targeted_retry:
+                    return result
+                continue
 
-        merged = self._merge_recovered_question_analyses(context, result, recovered, question_ids)
-        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
-        log_info(
-            logger,
-            "openai.analysis_recovery.completed",
-            "문항별 분석 복구 호출이 완료되었습니다.",
-            model=self._model,
-            operation=operation,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(response),
-            questionIds=question_ids,
-            recoveredAnalysisCount=len(recovered.questionAnalyses),
-            mergedAnalysisCount=len(merged.questionAnalyses),
-            **self._extract_usage_fields(response),
-        )
+            merged = self._merge_recovered_question_analyses(
+                context,
+                merged,
+                recovered,
+                target_ids,
+            )
+            remaining_question_ids = self._question_ids_requiring_recovery(context, merged)
+            if not targeted_retry:
+                recovery_batches.extend(
+                    [question_id]
+                    for question_id in remaining_question_ids
+                    if question_id in question_ids
+                )
+            observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            log_info(
+                logger,
+                "openai.analysis_recovery.completed",
+                "문항별 분석 복구 호출이 완료되었습니다.",
+                model=self._model,
+                operation=operation,
+                latencyMs=self._elapsed_millis(started_at),
+                openaiRequestId=self._extract_request_id(response),
+                questionIds=target_ids,
+                targetedRetry=targeted_retry,
+                remainingQuestionIds=remaining_question_ids,
+                recoveredAnalysisCount=len(recovered.questionAnalyses),
+                mergedAnalysisCount=len(merged.questionAnalyses),
+                **self._extract_usage_fields(response),
+            )
         return merged
 
     async def _recover_question_analyses_async(
@@ -760,49 +784,73 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
             return result
 
         operation = "analysis-recovery"
-        prompt = build_analysis_question_analyses_recovery_prompt(
-            context,
-            question_ids,
-            result.questionAnalyses,
-        )
-        started_at = monotonic()
-        log_info(
-            logger,
-            "openai.analysis_recovery.started",
-            "문항별 분석 복구 호출을 시작합니다.",
-            model=self._model,
-            operation=operation,
-            questionIds=question_ids,
-        )
-        try:
-            response = await await_if_needed(
-                self._async_client.responses.create(
-                    model=self._model,
-                    temperature=0.1,
-                    input=prompt,
-                    text=_analysis_question_analyses_recovery_text_config(),
-                )
+        merged = result
+        recovery_batches = [question_ids]
+        batch_index = 0
+        while batch_index < len(recovery_batches):
+            target_ids = recovery_batches[batch_index]
+            targeted_retry = batch_index > 0
+            batch_index += 1
+            prompt = build_analysis_question_analyses_recovery_prompt(
+                context,
+                target_ids,
+                merged.questionAnalyses,
             )
-            recovered = parse_analysis_question_analyses_recovery_response(response.output_text)
-        except Exception as exc:
-            self._log_analysis_recovery_failure(started_at, operation, question_ids, exc)
-            return result
+            started_at = monotonic()
+            log_info(
+                logger,
+                "openai.analysis_recovery.started",
+                "문항별 분석 복구 호출을 시작합니다.",
+                model=self._model,
+                operation=operation,
+                questionIds=target_ids,
+                targetedRetry=targeted_retry,
+            )
+            try:
+                response = await await_if_needed(
+                    self._async_client.responses.create(
+                        model=self._model,
+                        temperature=0.1,
+                        input=prompt,
+                        text=_analysis_question_analyses_recovery_text_config(),
+                    )
+                )
+                recovered = parse_analysis_question_analyses_recovery_response(response.output_text)
+            except Exception as exc:
+                self._log_analysis_recovery_failure(started_at, operation, target_ids, exc)
+                if not targeted_retry:
+                    return result
+                continue
 
-        merged = self._merge_recovered_question_analyses(context, result, recovered, question_ids)
-        observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
-        log_info(
-            logger,
-            "openai.analysis_recovery.completed",
-            "문항별 분석 복구 호출이 완료되었습니다.",
-            model=self._model,
-            operation=operation,
-            latencyMs=self._elapsed_millis(started_at),
-            openaiRequestId=self._extract_request_id(response),
-            questionIds=question_ids,
-            recoveredAnalysisCount=len(recovered.questionAnalyses),
-            mergedAnalysisCount=len(merged.questionAnalyses),
-            **self._extract_usage_fields(response),
-        )
+            merged = self._merge_recovered_question_analyses(
+                context,
+                merged,
+                recovered,
+                target_ids,
+            )
+            remaining_question_ids = self._question_ids_requiring_recovery(context, merged)
+            if not targeted_retry:
+                recovery_batches.extend(
+                    [question_id]
+                    for question_id in remaining_question_ids
+                    if question_id in question_ids
+                )
+            observe_llm_request(self._task_type, operation, "succeeded", self._elapsed_seconds(started_at))
+            log_info(
+                logger,
+                "openai.analysis_recovery.completed",
+                "문항별 분석 복구 호출이 완료되었습니다.",
+                model=self._model,
+                operation=operation,
+                latencyMs=self._elapsed_millis(started_at),
+                openaiRequestId=self._extract_request_id(response),
+                questionIds=target_ids,
+                targetedRetry=targeted_retry,
+                remainingQuestionIds=remaining_question_ids,
+                recoveredAnalysisCount=len(recovered.questionAnalyses),
+                mergedAnalysisCount=len(merged.questionAnalyses),
+                **self._extract_usage_fields(response),
+            )
         return merged
 
     def _question_ids_requiring_recovery(
