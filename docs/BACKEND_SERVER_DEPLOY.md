@@ -53,7 +53,9 @@ docker compose -f docker-compose.worker.prod.yml up -d worker
 - `DEPLOY_USER`
 - `DEPLOY_SSH_KEY`
 - `DEPLOY_PATH`
-- `GHCR_USERNAME`
-- `GHCR_TOKEN`
+
+GHCR 인증은 workflow 실행마다 발급되는 `GITHUB_TOKEN`을 사용하므로 별도의
+`GHCR_USERNAME`, `GHCR_TOKEN` Secret은 필요하지 않습니다. Workflow repository가
+`analysis-worker` package를 읽을 수 있어야 합니다.
 
 `DEPLOY_PATH` 는 백엔드 서버에서 `.env` 를 관리하는 디렉터리여야 한다. GitHub Actions가 같은 경로로 `docker-compose.worker.prod.yml` 을 업로드한다.
