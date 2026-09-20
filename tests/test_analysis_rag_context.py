@@ -62,10 +62,47 @@ class AnalysisRagContextTest(unittest.TestCase):
 
         self.assertEqual(context.corpusReferences, [])
         self.assertEqual(context.similarJobPostings, [])
+        self.assertIsNone(context.fewShot)
         prompt = build_analysis_prompt(context)
         self.assertNotIn("[직무 평가 기준 (Curated Corpus)]", prompt)
         self.assertNotIn("[유사 채용공고 참고]", prompt)
         self.assertNotIn("[RAG Context 우선순위 및 사용 규칙]", prompt)
+        self.assertNotIn("[Few-shot 예시]", prompt)
+
+    def test_prompt_includes_backend_selected_few_shot_block(self) -> None:
+        context = _base_context(
+            fewShot={
+                "promptBlock": "## 예시 FS-02\n입력과 승인 분석 예시",
+                "selectionMetadata": {
+                    "selectionMode": "EMBEDDING",
+                    "reason": "",
+                    "datasetVersion": "fewshot-pm-reviewed-20260914-v2",
+                    "minSimilarity": 0.4,
+                    "topK": 5,
+                    "minimumSelectedCount": 2,
+                    "scoreType": "COSINE_SIMILARITY",
+                    "cohereApiCallCount": 1,
+                    "selectedCases": [
+                        {
+                            "id": "FS-02",
+                            "source": "REVIEWED_PRODUCTION",
+                            "score": 0.51,
+                            "datasetVersion": "fewshot-pm-reviewed-20260914-v2",
+                        }
+                    ],
+                    "topScore": 0.51,
+                    "bottomScore": 0.51,
+                    "avgScore": 0.51,
+                },
+            }
+        )
+
+        prompt = build_analysis_prompt(context)
+
+        self.assertIn("[Few-shot 예시]", prompt)
+        self.assertIn("## 예시 FS-02", prompt)
+        self.assertIn("입력과 승인 분석 예시", prompt)
+        self.assertNotIn("fewshot-pm-reviewed-20260914-v2", prompt)
 
     def test_similar_job_postings_are_limited_to_top_three(self) -> None:
         context = _base_context(

@@ -32,6 +32,12 @@ analysis 는 기존처럼 아래 순서를 유지한다.
 
 analysis 의 repeated `result`/`complete` callback 역시 서버가 `200` no-op 성공을 반환하면 worker는 성공으로 처리한다.
 
+`context` 응답의 `fewShot`은 optional이다. 값이 있으면 Backend가 해당 task를 rollout cohort로
+선정하고 선택 결과를 snapshot에 고정한 것이므로, worker는 `fewShot.promptBlock`을 분석
+프롬프트의 `[Few-shot 예시]` 구역에 삽입한다. 값이 없거나 구버전 Backend가 필드를 보내지
+않으면 기존 프롬프트를 그대로 사용한다. `selectionMetadata`는 추적용이며 OpenAI 프롬프트에는
+삽입하지 않는다.
+
 ### Recovery / State Check
 
 - worker는 callback 재전송과 task 재실행을 같은 문제로 보지 않는다.

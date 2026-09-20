@@ -565,7 +565,23 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
         self._task_type = "ANALYSIS"
 
     def _build_analysis_prompt(self, context: AnalysisWorkerContextResponse) -> str:
-        return build_analysis_prompt(context)
+        try:
+            prompt = build_analysis_prompt(context)
+        except ValueError as exc:
+            raise NonRetryableWorkerError(
+                f"OpenAI 분석 입력 검증 실패: {exc}",
+                failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
+            ) from exc
+        return self._validate_analysis_prompt_budget(prompt)
+
+    def _validate_analysis_prompt_budget(self, prompt: str) -> str:
+        max_chars = settings.analysis_prompt_max_chars
+        if len(prompt) > max_chars:
+            raise NonRetryableWorkerError(
+                f"OpenAI 분석 입력이 설정된 문자 예산을 초과했습니다: {len(prompt)} > {max_chars}",
+                failure_reason=FailureReasonCode.VALIDATION_ERROR.value,
+            )
+        return prompt
 
     def _format_create_response_error_message(
         self,
@@ -730,6 +746,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 targetedRetry=targeted_retry,
             )
             try:
+                prompt = self._validate_analysis_prompt_budget(prompt)
                 response = self._client.responses.create(
                     model=self._model,
                     temperature=0.1,
@@ -807,6 +824,7 @@ class AnalysisOpenAiWorker(_OpenAiWorkerBase):
                 targetedRetry=targeted_retry,
             )
             try:
+                prompt = self._validate_analysis_prompt_budget(prompt)
                 response = await await_if_needed(
                     self._async_client.responses.create(
                         model=self._model,

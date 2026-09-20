@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+MAX_FEW_SHOT_PROMPT_BLOCK_LENGTH = 20_000
+
 
 class ApiEnvelope(BaseModel):
     isSuccess: bool
@@ -192,6 +194,33 @@ class CorpusReferenceContext(BaseModel):
     rank: int
 
 
+class FewShotSelectionCandidate(BaseModel):
+    id: str
+    source: str
+    score: float | None = None
+    datasetVersion: str
+
+
+class FewShotSelectionMetadata(BaseModel):
+    selectionMode: str
+    reason: str = ""
+    datasetVersion: str
+    minSimilarity: float
+    topK: int
+    minimumSelectedCount: int
+    scoreType: str
+    cohereApiCallCount: int
+    selectedCases: list[FewShotSelectionCandidate] = Field(default_factory=list)
+    topScore: float | None = None
+    bottomScore: float | None = None
+    avgScore: float | None = None
+
+
+class AnalysisWorkerFewShotContext(BaseModel):
+    promptBlock: str = Field(min_length=1, max_length=MAX_FEW_SHOT_PROMPT_BLOCK_LENGTH)
+    selectionMetadata: FewShotSelectionMetadata
+
+
 class AnalysisWorkerContextResponse(BaseModel):
     userId: int
     mockApplyId: int
@@ -206,6 +235,7 @@ class AnalysisWorkerContextResponse(BaseModel):
     questions: list[AnalysisQuestionContextResponse] = Field(default_factory=list)
     corpusReferences: list[CorpusReferenceContext] = Field(default_factory=list)
     similarJobPostings: list[SimilarJobPostingContext] = Field(default_factory=list)
+    fewShot: AnalysisWorkerFewShotContext | None = None
 
     @field_validator("similarJobPostings", mode="before")
     @classmethod
