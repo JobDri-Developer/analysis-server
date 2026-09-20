@@ -8,6 +8,7 @@ from app.schemas import (
     JobPostingClassificationCandidateResponse,
     JobPostingClassificationResultResponse,
     JobPostingExtractResponse,
+    MAX_FEW_SHOT_PROMPT_BLOCK_LENGTH,
 )
 
 MAX_CORPUS_REFERENCE_ITEMS = 8
@@ -250,6 +251,11 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 def _build_few_shot_block(context: AnalysisWorkerContextResponse) -> str:
     if context.fewShot is None:
         return ""
+    if len(context.fewShot.promptBlock) > MAX_FEW_SHOT_PROMPT_BLOCK_LENGTH:
+        raise ValueError(
+            "Few-shot prompt block exceeds the configured contract limit: "
+            f"{len(context.fewShot.promptBlock)} > {MAX_FEW_SHOT_PROMPT_BLOCK_LENGTH}"
+        )
     return f"""
 [Few-shot 예시]
 {context.fewShot.promptBlock}

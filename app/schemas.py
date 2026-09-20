@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+MAX_FEW_SHOT_PROMPT_BLOCK_LENGTH = 20_000
+
 
 class ApiEnvelope(BaseModel):
     isSuccess: bool
@@ -215,7 +217,7 @@ class FewShotSelectionMetadata(BaseModel):
 
 
 class AnalysisWorkerFewShotContext(BaseModel):
-    promptBlock: str = Field(min_length=1)
+    promptBlock: str = Field(min_length=1, max_length=MAX_FEW_SHOT_PROMPT_BLOCK_LENGTH)
     selectionMetadata: FewShotSelectionMetadata
 
 

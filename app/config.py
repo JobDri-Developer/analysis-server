@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(alias="OPENAI_API_KEY")
     openai_job_posting_model: str = Field(default="gpt-4o-mini", alias="OPENAI_JOB_POSTING_MODEL")
     openai_analysis_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_ANALYSIS_MODEL")
+    analysis_prompt_max_chars: int = Field(
+        default=120000,
+        ge=1,
+        alias="APP_WORKER_ANALYSIS_PROMPT_MAX_CHARS",
+    )
     job_posting_confidence_threshold: float = Field(
         default=0.65,
         alias="JOB_POSTING_CLASSIFICATION_CONFIDENCE_THRESHOLD",
