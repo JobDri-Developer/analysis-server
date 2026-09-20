@@ -71,6 +71,11 @@ class AnalysisPromptBudgetTest(unittest.TestCase):
 
         self.assertIn("[Few-shot 예시]", prompt)
 
+        with patch.object(settings, "analysis_prompt_max_chars", len(prompt)):
+            boundary_prompt = worker._build_analysis_prompt(_context(prompt_block="승인된 예시"))
+
+        self.assertEqual(boundary_prompt, prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
