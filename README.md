@@ -108,7 +108,7 @@ RabbitMQ 연결은 `aio-pika` 기반이며, 채널 QoS `prefetch_count=WORKER_PR
 3. 큐 대기 시간이 `APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS` 를 초과했는지 먼저 검사합니다.
 4. `/api/internal/worker/analysis/tasks/{taskId}/running` 으로 상태를 `RUNNING` 처리합니다.
 5. `/api/internal/worker/analysis/context` 로 분석에 필요한 공고/문항/답변 데이터를 조회합니다.
-6. OpenAI로 분석을 수행합니다.
+6. context에 optional `fewShot`이 있으면 승인된 Few-shot prompt block을 삽입하고 OpenAI로 분석을 수행합니다.
 7. `/result` 로 분석 결과를 저장합니다.
 8. `/complete` 로 최종 완료 처리합니다.
 

@@ -133,6 +133,7 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
     corpus_reference_block = _build_corpus_reference_block(context)
     similar_job_posting_block = _build_similar_job_posting_block(context)
     rag_priority_block = _build_rag_priority_block(context)
+    few_shot_block = _build_few_shot_block(context)
     return f"""
 당신은 자기소개서 분석 평가자입니다.
 지원 직무 적합도, 답변의 임팩트, 전체 완성도를 0부터 100 사이 정수로 평가하고,
@@ -227,6 +228,8 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 - missing 예시: JD의 mainTask에 "재고 예측 모델 운영"이 있으나 모든 답변에 관련 언급이 없다면 questionAnalyses가 아니라 missingKeywords에 넣는다.
 - 예시는 의미 기준만 보여 주며, 실제 입력에 없는 문장이나 상태를 만들기 위해 복사하지 않는다.
 
+{few_shot_block}
+
 [채용 공고]
 - 회사명: {context.companyName}
 - 직무명: {context.jobTitle}
@@ -241,6 +244,15 @@ def build_analysis_prompt(context: AnalysisWorkerContextResponse) -> str:
 
 [문항 및 답변]
 {question_block}
+""".strip()
+
+
+def _build_few_shot_block(context: AnalysisWorkerContextResponse) -> str:
+    if context.fewShot is None:
+        return ""
+    return f"""
+[Few-shot 예시]
+{context.fewShot.promptBlock}
 """.strip()
 
 
