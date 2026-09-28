@@ -1,5 +1,6 @@
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -40,6 +41,7 @@ class Settings(BaseSettings):
     spring_internal_api_key: str = Field(alias="APP_WORKER_INTERNAL_API_KEY")
 
     openai_api_key: str = Field(alias="OPENAI_API_KEY")
+    openai_base_url: Optional[str] = Field(default=None, alias="OPENAI_BASE_URL")
     openai_job_posting_model: str = Field(default="gpt-4o-mini", alias="OPENAI_JOB_POSTING_MODEL")
     openai_analysis_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_ANALYSIS_MODEL")
     analysis_prompt_max_chars: int = Field(

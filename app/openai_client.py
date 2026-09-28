@@ -81,7 +81,7 @@ def _processing_sla_timeout_seconds() -> float:
 def _build_async_openai_client(*, api_key: str, timeout: float):
     if AsyncOpenAI is None:
         raise RuntimeError("AsyncOpenAI client is required for worker initialization.")
-    return AsyncOpenAI(api_key=api_key, timeout=timeout)
+    return AsyncOpenAI(api_key=api_key, timeout=timeout, base_url=settings.openai_base_url)
 
 
 class _OpenAiWorkerBase:
@@ -179,7 +179,11 @@ class _OpenAiWorkerBase:
 class JobPostingOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:
         timeout = _processing_sla_timeout_seconds()
-        self._client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
+        self._client = OpenAI(
+            api_key=settings.openai_api_key,
+            timeout=timeout,
+            base_url=settings.openai_base_url,
+        )
         self._async_client = _build_async_openai_client(api_key=settings.openai_api_key, timeout=timeout)
         self._model = settings.openai_job_posting_model
         self._task_type = "JOB_POSTING_INGEST"
@@ -559,7 +563,11 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
 class AnalysisOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:
         timeout = _processing_sla_timeout_seconds()
-        self._client = OpenAI(api_key=settings.openai_api_key, timeout=timeout)
+        self._client = OpenAI(
+            api_key=settings.openai_api_key,
+            timeout=timeout,
+            base_url=settings.openai_base_url,
+        )
         self._async_client = _build_async_openai_client(api_key=settings.openai_api_key, timeout=timeout)
         self._model = settings.openai_analysis_model
         self._task_type = "ANALYSIS"
