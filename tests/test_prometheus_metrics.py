@@ -22,7 +22,10 @@ from app.main import metrics
 from app.metrics import (
     DURATION_BUCKETS,
     increment_llm_request_error,
+    increment_dlq_publish,
+    increment_message_duplicate,
     observe_internal_api,
+    set_recovery_spool_pending,
     set_task_concurrency_limit,
 )
 from app.openai_client import APIStatusError, AnalysisOpenAiWorker, JobPostingOpenAiWorker
@@ -194,6 +197,20 @@ class PrometheusMetricsTests(unittest.TestCase):
 
     def test_duration_buckets_extend_beyond_observed_queue_wait_ceiling(self) -> None:
         self.assertGreater(max(DURATION_BUCKETS), 300.0)
+
+    def test_load_safety_metrics_track_duplicate_dlq_and_spool(self) -> None:
+        duplicate_labels = {"task_type": "analysis", "stage": "terminal_task"}
+        dlq_labels = {"task_type": "analysis", "outcome": "published", "reason": "rate_limit"}
+        duplicate_before = _sample_value("worker_message_duplicate_total", duplicate_labels)
+        dlq_before = _sample_value("worker_dlq_publish_total", dlq_labels)
+
+        increment_message_duplicate("ANALYSIS", "terminal_task")
+        increment_dlq_publish("ANALYSIS", "published", "RATE_LIMIT")
+        set_recovery_spool_pending(7)
+
+        self.assertEqual(_sample_value("worker_message_duplicate_total", duplicate_labels), duplicate_before + 1.0)
+        self.assertEqual(_sample_value("worker_dlq_publish_total", dlq_labels), dlq_before + 1.0)
+        self.assertEqual(_sample_value("worker_recovery_spool_pending", {}), 7.0)
 
     def test_job_posting_classify_fallback_records_fallback_llm_outcome(self) -> None:
         worker = JobPostingOpenAiWorker.__new__(JobPostingOpenAiWorker)
@@ -587,8 +604,8 @@ class PrometheusMetricsTests(unittest.TestCase):
             JobPostingOpenAiWorker()
             AnalysisOpenAiWorker()
 
-        openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345)
-        async_openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345)
+        openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345, base_url=None)
+        async_openai_mock.assert_any_call(api_key="test-openai-key", timeout=12.345, base_url=None)
 
     def test_openai_workers_require_async_client_for_initialization(self) -> None:
         with patch("app.openai_client.AsyncOpenAI", None), patch("app.openai_client.OpenAI"):

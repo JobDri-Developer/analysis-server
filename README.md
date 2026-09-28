@@ -239,6 +239,7 @@ OpenAI 호출은 성공했지만 Spring 내부 API로 최종 완료 콜백을 �
 
 - `OPENAI_JOB_POSTING_MODEL=gpt-4o-mini`
 - `OPENAI_ANALYSIS_MODEL=gpt-4.1-mini`
+- `OPENAI_BASE_URL`은 기본적으로 비워 두며, 격리 부하 테스트에서만 OpenAI 호환 stub URL을 지정합니다.
 
 ## 9. 프로젝트 구조
 

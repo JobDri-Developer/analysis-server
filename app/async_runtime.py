@@ -9,7 +9,12 @@ from typing import Any
 from app.config import settings
 from app.error_codes import FailureReasonCode
 from app.logging_utils import bind_log_context, log_exception, log_info, log_warning
-from app.metrics import increment_task_retry
+from app.metrics import (
+    increment_dlq_publish,
+    increment_message_duplicate,
+    increment_task_retry,
+    set_recovery_spool_pending,
+)
 from app.schemas import (
     AnalysisTaskMessage,
     AnalysisTaskStatusResponse,
@@ -195,6 +200,7 @@ class AsyncConsumerRuntime:
             return
 
         if not self._consumer._register_inflight(message.taskId, message.taskType):
+            increment_message_duplicate(message.taskType, "inflight")
             with bind_log_context(**self._consumer._message_log_context(message)):
                 log_warning(
                     logger,
@@ -307,6 +313,7 @@ class AsyncConsumerRuntime:
 
         try:
             entries = self._consumer._recovery_store.list_entries()
+            set_recovery_spool_pending(len(entries))
             if not entries:
                 return
 
@@ -525,6 +532,7 @@ class AsyncConsumerRuntime:
         outcome_reason: str,
     ) -> str:
         if self._consumer._terminal_message_store.contains(message.taskId, message.messageId):
+            increment_message_duplicate(message.taskType, "terminal_ledger")
             with bind_log_context(**self._consumer._message_log_context(message, retry_count=retry_count, queue_latency_millis=queue_latency_millis)):
                 log_warning(
                     logger,
@@ -538,6 +546,7 @@ class AsyncConsumerRuntime:
             return "failed"
 
         if await self._is_task_already_terminal_async(message):
+            increment_message_duplicate(message.taskType, "terminal_task")
             with bind_log_context(**self._consumer._message_log_context(message, retry_count=retry_count, queue_latency_millis=queue_latency_millis)):
                 log_warning(
                     logger,
@@ -598,6 +607,8 @@ class AsyncConsumerRuntime:
         failure_reason: str,
     ) -> bool:
         if self._consumer._terminal_message_store.contains(message.taskId, message.messageId):
+            increment_message_duplicate(message.taskType, "dlq_terminal_ledger")
+            increment_dlq_publish(message.taskType, "skipped", failure_reason)
             log_warning(
                 logger,
                 "worker.dlq.skipped",
@@ -615,6 +626,11 @@ class AsyncConsumerRuntime:
             errorCode=failure_reason,
         )
         published = await self._publish_dlq_async(body, properties, message)
+        increment_dlq_publish(
+            message.taskType,
+            "published" if published else "failed",
+            failure_reason,
+        )
         log_info(
             logger,
             "worker.dlq.publish.completed",

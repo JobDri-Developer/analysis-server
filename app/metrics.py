@@ -96,6 +96,23 @@ worker_task_concurrency_limit = Gauge(
     labelnames=("task_type",),
 )
 
+worker_message_duplicate_total = Counter(
+    "worker_message_duplicate_total",
+    "Count of duplicate or already-terminal worker messages.",
+    labelnames=("task_type", "stage"),
+)
+
+worker_dlq_publish_total = Counter(
+    "worker_dlq_publish_total",
+    "Count of worker messages published or skipped on the DLQ path.",
+    labelnames=("task_type", "outcome", "reason"),
+)
+
+worker_recovery_spool_pending = Gauge(
+    "worker_recovery_spool_pending",
+    "Current pending recovery spool entries visible to the worker.",
+)
+
 _CONTEXT_ENDPOINTS = {
     "analysis_context",
     "job_posting_context",
@@ -156,6 +173,25 @@ def decrement_task_inflight(task_type: str | None) -> None:
 
 def set_task_concurrency_limit(task_type: str | None, limit: int) -> None:
     worker_task_concurrency_limit.labels(task_type=task_type_label(task_type)).set(max(float(limit), 0.0))
+
+
+def increment_message_duplicate(task_type: str | None, stage: str) -> None:
+    worker_message_duplicate_total.labels(
+        task_type=task_type_label(task_type),
+        stage=stage,
+    ).inc()
+
+
+def increment_dlq_publish(task_type: str | None, outcome: str, reason: str | None) -> None:
+    worker_dlq_publish_total.labels(
+        task_type=task_type_label(task_type),
+        outcome=outcome,
+        reason=reason_label(reason),
+    ).inc()
+
+
+def set_recovery_spool_pending(count: int) -> None:
+    worker_recovery_spool_pending.set(max(float(count), 0.0))
 
 
 def observe_llm_request(task_type: str | None, operation: str, outcome: str, seconds: float) -> None:
