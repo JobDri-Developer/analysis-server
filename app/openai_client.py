@@ -74,7 +74,9 @@ def _analysis_question_analyses_recovery_text_config() -> dict[str, Any]:
     }
 
 
-def _processing_sla_timeout_seconds() -> float:
+def _openai_timeout_seconds() -> float:
+    if settings.openai_timeout_seconds is not None:
+        return settings.openai_timeout_seconds
     return max(settings.analysis_queue_timeout_millis / 1000, 1.0)
 
 
@@ -178,7 +180,7 @@ class _OpenAiWorkerBase:
 
 class JobPostingOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:
-        timeout = _processing_sla_timeout_seconds()
+        timeout = _openai_timeout_seconds()
         self._client = OpenAI(
             api_key=settings.openai_api_key,
             timeout=timeout,
@@ -562,7 +564,7 @@ class JobPostingOpenAiWorker(_OpenAiWorkerBase):
 
 class AnalysisOpenAiWorker(_OpenAiWorkerBase):
     def __init__(self) -> None:
-        timeout = _processing_sla_timeout_seconds()
+        timeout = _openai_timeout_seconds()
         self._client = OpenAI(
             api_key=settings.openai_api_key,
             timeout=timeout,

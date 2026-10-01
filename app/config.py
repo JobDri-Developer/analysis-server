@@ -42,6 +42,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(alias="OPENAI_API_KEY")
     openai_base_url: Optional[str] = Field(default=None, alias="OPENAI_BASE_URL")
+    openai_timeout_seconds: Optional[float] = Field(default=None, gt=0, alias="OPENAI_TIMEOUT_SECONDS")
     openai_job_posting_model: str = Field(default="gpt-4o-mini", alias="OPENAI_JOB_POSTING_MODEL")
     openai_analysis_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_ANALYSIS_MODEL")
     analysis_prompt_max_chars: int = Field(

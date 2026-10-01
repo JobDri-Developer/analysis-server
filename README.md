@@ -105,7 +105,7 @@ RabbitMQ 연결은 `aio-pika` 기반이며, 채널 QoS `prefetch_count=WORKER_PR
 
 1. Spring이 분석 작업 메시지를 큐에 적재합니다.
 2. 워커가 메시지를 소비합니다.
-3. 큐 대기 시간이 `APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS` 를 초과했는지 먼저 검사합니다.
+3. 큐 대기 시간이 `APP_WORKER_ANALYSIS_QUEUE_TIMEOUT_MILLIS` 를 초과했는지 먼저 검사합니다. OpenAI 호출 timeout은 `OPENAI_TIMEOUT_SECONDS`로 별도 설정하며, 생략하면 기존과 같이 queue timeout을 초 단위로 변환한 값을 사용합니다.
 4. `/api/internal/worker/analysis/tasks/{taskId}/running` 으로 상태를 `RUNNING` 처리합니다.
 5. `/api/internal/worker/analysis/context` 로 분석에 필요한 공고/문항/답변 데이터를 조회합니다.
 6. context에 optional `fewShot`이 있으면 승인된 Few-shot prompt block을 삽입하고 OpenAI로 분석을 수행합니다.
