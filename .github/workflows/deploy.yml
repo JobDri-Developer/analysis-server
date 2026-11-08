@@ -75,7 +75,7 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          IMAGE_TAG: latest
+          IMAGE_TAG: ${{ github.sha }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -92,5 +92,6 @@ jobs:
             export WORKER_IMAGE_TAG="$IMAGE_TAG"
             docker compose -f "${{ env.REMOTE_COMPOSE_FILE }}" config --services | grep -Fx worker
             docker compose -f "${{ env.REMOTE_COMPOSE_FILE }}" pull worker
+            docker compose -f "${{ env.REMOTE_COMPOSE_FILE }}" run --rm --no-deps worker python -c "from app.backend_contract import check_backend_contract; check_backend_contract()"
             docker compose -f "${{ env.REMOTE_COMPOSE_FILE }}" up -d worker
             docker image prune -f

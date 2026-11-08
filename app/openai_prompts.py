@@ -17,6 +17,7 @@ MAX_CORPUS_REFERENCES_LENGTH = 6_000
 
 
 def build_job_posting_extract_prompt(raw_text: str, has_image: bool) -> str:
+    """Build the shared extraction contract prompt for text or image input."""
     return f"""
 이 {"이미지 또는 텍스트" if has_image else "텍스트"}는 채용 공고입니다.
 공고 제목, 회사명, 직무명, 주요 업무, 자격 요건, 우대 사항을 추출해주세요.

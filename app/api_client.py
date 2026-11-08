@@ -9,6 +9,7 @@ import httpx
 import requests
 from pydantic import TypeAdapter, ValidationError
 
+from app.backend_contract import check_backend_contract, check_backend_contract_async
 from app.config import settings
 from app.logging_utils import ensure_request_id, log_error, log_info, log_warning
 from app.metrics import observe_internal_api
@@ -519,6 +520,9 @@ class SpringWorkerApiClient:
         method: str,
         allow_not_found: bool = False,
     ) -> ApiEnvelope | None:
+        """Send a synchronous request after checking production extraction compatibility."""
+        if task_type == "JOB_POSTING_INGEST" and settings.environment.lower() == "prod":
+            check_backend_contract()
         url = settings.spring_api_base_url.rstrip("/") + path
         request_headers = self._build_request_headers()
         log_info(
@@ -590,6 +594,9 @@ class SpringWorkerApiClient:
         method: str,
         allow_not_found: bool = False,
     ) -> ApiEnvelope | None:
+        """Send an asynchronous request after checking production extraction compatibility."""
+        if task_type == "JOB_POSTING_INGEST" and settings.environment.lower() == "prod":
+            await check_backend_contract_async(self._async_client)
         request_headers = self._build_request_headers()
         log_info(
             logger,

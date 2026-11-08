@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from app.backend_contract import check_backend_contract
 from app.config import settings
 from app.consumer import RabbitMqConsumer
 from app.logging_utils import bind_log_context, configure_worker_logging, log_info
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 def startup_event() -> None:
+    """Verify production backend compatibility before starting queue consumption."""
+    if settings.environment.lower() == "prod":
+        check_backend_contract()
     with bind_log_context(logType=settings.worker_log_type):
         log_info(logger, "worker.app.startup", "FastAPI worker startup을 시작합니다.")
     consumer.start()
