@@ -30,13 +30,18 @@ def build_job_posting_extract_prompt(raw_text: str, has_image: bool) -> str:
   "requirements": "string",
   "preferredQualifications": "string",
   "rawText": "string",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "requiredSkills": ["string"],
+  "deadlineAt": "string"
 }}
 
 규칙:
 1. postingName은 원문에 명시된 채용 공고 제목을 그대로 추출하세요.
 2. 원문에 공고 제목이 없거나 확실하지 않으면 postingName은 반드시 빈 문자열로 두세요.
 3. postingName을 회사명과 직무명으로 새로 만들거나 요약하지 마세요.
+4. requiredSkills는 공고에 명시된 기술명만 중복 없이 배열로 반환하고, 없으면 빈 배열로 두세요.
+5. deadlineAt은 마감 시각을 ISO-8601 local date-time 형식(yyyy-MM-dd'T'HH:mm:ss)으로 반환하고, 알 수 없으면 빈 문자열로 두세요.
+6. deadlineAt에는 시간대 오프셋이나 Z를 붙이지 마세요. 원문에서 확인할 수 없는 마감 날짜·시각을 임의로 만들지 마세요.
 
 [채용 공고 텍스트]
 {raw_text}

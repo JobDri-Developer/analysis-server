@@ -56,6 +56,15 @@ class JobPostingExtractResponse(BaseModel):
     preferredQualifications: str = ""
     rawText: str = ""
     confidence: float = 0.0
+    requiredSkills: list[str] = Field(default_factory=list)
+    deadlineAt: str = ""
+
+    @field_validator("requiredSkills", "deadlineAt", mode="before")
+    @classmethod
+    def normalize_missing_extraction_fields(cls, value: Any, info: Any) -> Any:
+        if value is None:
+            return [] if info.field_name == "requiredSkills" else ""
+        return value
 
 
 class JobPostingClassificationCandidateResponse(BaseModel):
